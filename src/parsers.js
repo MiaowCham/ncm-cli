@@ -6,11 +6,14 @@ export function parseIdCommand(input) {
 export function parseLoginCommand(input) {
   const match = input.trim().match(/^\/login(?:\s+([\s\S]+))?$/i);
   if (!match) return null;
-  return { cookie: match[1]?.trim() || null };
+  const argument = match[1]?.trim() || null;
+  if (!argument) return { action: 'qr', cookie: null };
+  if (/^status$/i.test(argument)) return { action: 'status', cookie: null };
+  return { action: 'cookie', cookie: argument };
 }
 
 export function parseLyricAction(input) {
-  const match = input.trim().match(/^(?:l|lyric|歌词)(?:\s*(?:>|\|)\s*(.+))?$/i);
+  const match = input.trim().match(/^\/?(?:l|lyric|歌词)(?:\s*(?:>|\|)\s*(.+))?$/i);
   if (!match) return null;
   return { output: match[1]?.trim() || null };
 }
@@ -25,7 +28,22 @@ export function normalizeCookie(raw) {
     throw new Error('Cookie 格式无效，应类似 MUSIC_U=xxx; __csrf=xxx');
   }
   value = value.replace(/[\r\n]/g, '').trim();
-  return value;
+  const attributes = new Set([
+    'path', 'expires', 'max-age', 'domain', 'secure', 'httponly',
+    'samesite', 'priority', 'partitioned'
+  ]);
+  const cookies = new Map();
+  const parts = value.split(/;\s*|,\s*(?=[!#$%&'*+\-.^_`|~0-9A-Za-z]+=)/);
+  for (const part of parts) {
+    const separator = part.indexOf('=');
+    if (separator <= 0) continue;
+    const name = part.slice(0, separator).trim();
+    const cookieValue = part.slice(separator + 1).trim();
+    if (!name || !cookieValue || attributes.has(name.toLowerCase())) continue;
+    cookies.set(name, cookieValue);
+  }
+  if (!cookies.size) throw new Error('Cookie 中没有可用的键值对');
+  return [...cookies].map(([name, cookieValue]) => `${name}=${cookieValue}`).join('; ');
 }
 
 export function normalizeSong(raw) {

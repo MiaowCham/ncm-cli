@@ -34,12 +34,13 @@ function renderProgress(elapsed, duration, lyric) {
   process.stdout.write(line.slice(0, process.stdout.columns || 120));
 }
 
-export async function playWithProgress({ url, durationMs, lyricSource = '' }) {
+export async function playWithProgress({ url, durationMs, lyricSource = '', signal, logger }) {
   const player = findPlayer();
   if (!player) {
     throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试；播放链接仍可通过 [u] 获取。');
   }
   const child = spawn(player.command, player.args(url), { stdio: 'ignore', windowsHide: true });
+  void logger?.info('player_spawn', { player: player.command, pid: child.pid });
   const lines = parseLrc(lyricSource);
   const startedAt = Date.now();
   let spawnError = null;
@@ -50,11 +51,31 @@ export async function playWithProgress({ url, durationMs, lyricSource = '' }) {
     if (process.stdout.isTTY) renderProgress(elapsed, durationMs, currentLyric(lines, elapsed));
   }, 250);
 
+  let forceTimer = null;
+  const abortPlayback = () => {
+    if (child.exitCode !== null || child.killed) return;
+    if (process.platform === 'win32' && child.pid) {
+      spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      return;
+    }
+    child.kill('SIGTERM');
+    forceTimer = setTimeout(() => {
+      if (child.exitCode !== null) return;
+      child.kill('SIGKILL');
+    }, 1000);
+  };
+  signal?.addEventListener('abort', abortPlayback, { once: true });
+  if (signal?.aborted) abortPlayback();
+
   try {
     await once(child, 'exit');
     if (spawnError) throw spawnError;
+    void logger?.info('player_exit', { player: player.command, code: child.exitCode, signal: child.signalCode });
+    if (signal?.aborted) throw signal.reason || new DOMException('操作已取消', 'AbortError');
   } finally {
     clearInterval(timer);
+    if (forceTimer) clearTimeout(forceTimer);
+    signal?.removeEventListener('abort', abortPlayback);
     if (process.stdout.isTTY) {
       renderProgress(Math.min(Date.now() - startedAt, durationMs), durationMs, '');
       process.stdout.write('\n');
@@ -67,12 +88,13 @@ function imageBufferFromDataUri(source) {
   return match ? Buffer.from(match[1], 'base64') : null;
 }
 
-async function loadImage(source) {
+async function loadImage(source, signal) {
   const inline = imageBufferFromDataUri(source);
   if (inline) return inline;
   const parsed = new URL(source);
   if (parsed.protocol !== 'https:') throw new Error('只加载 HTTPS 图片');
-  const response = await fetch(parsed, { signal: AbortSignal.timeout(10000) });
+  const timeoutSignal = AbortSignal.timeout(10000);
+  const response = await fetch(parsed, { signal: signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal });
   if (!response.ok) throw new Error(`图片请求失败：HTTP ${response.status}`);
   const type = response.headers.get('content-type') || '';
   if (!type.startsWith('image/')) throw new Error('响应不是图片');
@@ -83,10 +105,10 @@ async function loadImage(source) {
   return buffer;
 }
 
-export async function tryRenderImage(source) {
+export async function tryRenderImage(source, { signal } = {}) {
   if (!source || !process.stdout.isTTY) return false;
   try {
-    const buffer = await loadImage(source);
+    const buffer = await loadImage(source, signal);
 
     // chafa 的 ANSI/Unicode 输出对 Windows Terminal 与 GNOME Terminal/VTE
     // 最稳妥，因此优先于 Kitty/iTerm 图片协议。
