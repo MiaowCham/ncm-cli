@@ -41,17 +41,18 @@ id 347230
 ```text
 /login
 /login MUSIC_U=你的值; __csrf=你的值
+/login status
 ```
 
-无参数 `/login` 始终打印登录链接，然后按“字符二维码 → 与封面相同的图像渲染 → 仅链接”降级。登录成功后 Cookie 会缓存到操作系统的用户配置目录；后续每个 API 请求都会携带 Cookie header。可用 `NCM_CLI_CONFIG_DIR` 自定义缓存目录。
+无参数 `/login` 始终打印登录链接，然后按“字符二维码 → 与封面相同的图像渲染 → 仅链接”降级。登录成功后 Cookie 会清理为标准 Cookie Header 格式并缓存到操作系统的用户配置目录；旧版缓存会在启动时自动迁移。后续每个 API 请求都会携带 Cookie header。可用 `/login status` 向服务端验证当前登录状态，可用 `NCM_CLI_CONFIG_DIR` 自定义缓存目录。
 
 选中歌曲后可使用：
 
 ```text
-p                 播放（进度条 + 逐行歌词）
-l                 打印歌词
-l > lyrics.txt    写入歌词文件
-歌词 | lyrics.txt  写入歌词文件（兼容管道符风格语法）
+p                       播放（进度条 + 逐行歌词）
+/lyric                  选择纯歌词、原始 LRC、翻译 LRC 或合并 LRC
+/lyric > lyrics.lrc     选择格式后写入文件
+/lyric | lyrics.lrc     写入文件（兼容管道符风格语法）
 u                 打印播放链接
 b                 返回搜索
 ```
@@ -73,6 +74,17 @@ npm run test:live
 ```
 
 `npm test` 不访问网络；`npm run test:live` 会访问配置的 API 服务。
+
+## 退出与日志
+
+在主提示、登录轮询、网络请求或播放过程中按 `Ctrl+C`，程序会取消当前操作、终止播放器并以退出码 `130` 退出。
+
+默认日志为脱敏 JSONL，不记录 Cookie、二维码数据、搜索词、歌词正文或完整媒体 URL：
+
+- Windows：`%LOCALAPPDATA%\ncm-cli\logs\ncm-cli.log`
+- 其他系统：位于用户配置目录下的 `ncm-cli/logs/ncm-cli.log`
+
+日志按 `1 MiB × 5` 轮转。可用 `NCM_CLI_LOG_FILE` 自定义路径、`NCM_CLI_LOG_LEVEL=debug|info|warn|error` 调整级别。
 
 ## 安全说明
 

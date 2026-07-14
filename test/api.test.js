@@ -65,3 +65,62 @@ test('新版播放接口失败时回退旧接口', async () => {
     await once(server, 'close');
   }
 });
+
+test('播放接口无 URL 时保留诊断 code', async () => {
+  const server = http.createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    response.end('{"data":[{"id":1,"code":404,"url":null}]}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const result = await api.songUrl('1');
+    assert.equal(result.url, null);
+    assert.equal(result.code, 404);
+    assert.equal(result.attempts.length, 2);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('登录状态同时校验 account 和 profile', async () => {
+  const server = http.createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    response.end('{"data":{"code":200,"account":{"id":1},"profile":{"nickname":"tester"}}}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const status = await api.loginStatus();
+    assert.equal(status.loggedIn, true);
+    assert.equal(status.profile.nickname, 'tester');
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('外部 AbortSignal 可以取消进行中的 API 请求', async () => {
+  const server = http.createServer((request, response) => {
+    setTimeout(() => {
+      response.setHeader('content-type', 'application/json');
+      response.end('{"code":200}');
+    }, 1000);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const controller = new AbortController();
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const pending = api.request('/slow', {}, { signal: controller.signal });
+    controller.abort(new DOMException('test abort', 'AbortError'));
+    await assert.rejects(pending, (error) => error.name === 'AbortError');
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    await once(server, 'close');
+  }
+});

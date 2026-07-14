@@ -32,3 +32,31 @@ export function plainLyrics(source = '') {
     .filter(Boolean)
     .join('\n');
 }
+
+function formatLrcTime(timeMs) {
+  const safe = Math.max(0, Math.round(timeMs));
+  const minutes = Math.floor(safe / 60000);
+  const seconds = Math.floor((safe % 60000) / 1000);
+  const milliseconds = safe % 1000;
+  return `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}]`;
+}
+
+export function mergeTranslatedLrc(original = '', translated = '') {
+  const timeline = new Map();
+  for (const [kind, source] of [['original', original], ['translated', translated]]) {
+    for (const line of parseLrc(source)) {
+      const entry = timeline.get(line.timeMs) || { original: [], translated: [] };
+      entry[kind].push(line.text);
+      timeline.set(line.timeMs, entry);
+    }
+  }
+  const output = [];
+  for (const [timeMs, entry] of [...timeline].sort(([left], [right]) => left - right)) {
+    const tag = formatLrcTime(timeMs);
+    for (const text of entry.original) output.push(`${tag}${text}`);
+    for (const text of entry.translated) {
+      if (text && !entry.original.includes(text)) output.push(`${tag}${text}`);
+    }
+  }
+  return output.join('\n');
+}

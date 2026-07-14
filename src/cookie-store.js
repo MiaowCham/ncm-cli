@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { normalizeCookie } from './parsers.js';
 
 export function configFilePath(env = process.env, platform = process.platform) {
   if (env.NCM_CLI_CONFIG_DIR) return path.join(env.NCM_CLI_CONFIG_DIR, 'cookie.json');
@@ -14,7 +15,15 @@ export function configFilePath(env = process.env, platform = process.platform) {
 export async function loadCookie(file = configFilePath()) {
   try {
     const data = JSON.parse(await readFile(file, 'utf8'));
-    return typeof data.cookie === 'string' ? data.cookie : null;
+    if (typeof data.cookie !== 'string') return null;
+    let normalized;
+    try {
+      normalized = normalizeCookie(data.cookie);
+    } catch {
+      return null;
+    }
+    if (normalized !== data.cookie) await saveCookie(normalized, file);
+    return normalized;
   } catch (error) {
     if (error.code === 'ENOENT' || error instanceof SyntaxError) return null;
     throw error;
