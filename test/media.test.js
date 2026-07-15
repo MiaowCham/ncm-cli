@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { adjustPlaybackOffset, attachLyricTranslations, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, smtcTimeline, supportsSixelEnvironment, toggleTranslationState, wrapTerminalText } from '../src/media.js';
+import { adjustPlaybackOffset, attachLyricTranslations, createLatestDebounce, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, smtcTimeline, supportsSixelEnvironment, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
 import stringWidth from 'string-width';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
@@ -190,6 +190,31 @@ test('播放器重启等待期间可冻结播放时钟避免吞掉音频片段',
   clock.resume();
   now = 3700;
   assert.equal(clock.position(), 1700);
+});
+
+test('连续播放器控制只应用最后一次待处理重启', async () => {
+  const values = [];
+  const debounce = createLatestDebounce((value) => values.push(value), 10);
+  debounce.schedule(10);
+  debounce.schedule(20);
+  debounce.schedule(30);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(values, [30]);
+  debounce.schedule(40);
+  debounce.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.deepEqual(values, [30]);
+});
+
+test('切歌等待可被独立信号立即取消', async () => {
+  let resolveSource;
+  const source = new Promise((resolve) => { resolveSource = resolve; });
+  const controller = new AbortController();
+  const waiting = waitWithSignal(source, controller.signal);
+  controller.abort(new DOMException('退出播放', 'AbortError'));
+  await assert.rejects(waiting, { name: 'AbortError' });
+  resolveSource('迟到的结果');
+  await Promise.resolve();
 });
 
 test('歌词视窗只显示当前行和未来行且不超过容量', () => {

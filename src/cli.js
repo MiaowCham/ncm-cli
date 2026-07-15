@@ -165,8 +165,13 @@ function printSearchResults(songs) {
   });
 }
 
-async function ask(rl, prompt, signal) {
-  return rl.question(prompt, { signal });
+export async function ask(rl, prompt, signal, { recordHistory = false } = {}) {
+  const history = !recordHistory && Array.isArray(rl.history) ? [...rl.history] : null;
+  try {
+    return await rl.question(prompt, { signal });
+  } finally {
+    if (history) rl.history.splice(0, rl.history.length, ...history);
+  }
 }
 
 function delay(ms, signal) {
@@ -536,8 +541,36 @@ function unavailableUrlMessage(result, authState) {
   return `无法播放：API 返回歌曲状态 code=${code}，未提供 URL（当前${auth}）。可能受会员、版权或地区限制。`;
 }
 
-async function songMenu(rl, api, song, context) {
+async function playSong(api, song, context, rl, cachedLyrics = null) {
   const { signal, logger, authState, shutdown } = context;
+  const result = await api.songUrl(song.id, { signal });
+  if (!result?.url) {
+    console.log(unavailableUrlMessage(result, authState));
+    console.log(`诊断日志：${logger.file}`);
+    return cachedLyrics;
+  }
+  const lyrics = cachedLyrics || await api.lyrics(song.id, { signal });
+  await playWithProgress({
+    song,
+    url: result.url,
+    durationMs: song.durationMs,
+    lyricSource: lyrics.original,
+    translatedLyricSource: lyrics.translated,
+    lyricOffsetMs: context.settings.lyricOffsetMs,
+    smtcOffsetMs: context.settings.smtcOffsetMs,
+    signal,
+    logger,
+    rl,
+    onOffsetChange: (value) => persistPlaybackOffset(
+      context.settings, value, logger, 'playback_hotkey'
+    ),
+    onInterrupt: () => shutdown('playback_ctrl_c')
+  });
+  return lyrics;
+}
+
+async function songMenu(rl, api, song, context) {
+  const { signal, authState } = context;
   await showSong(song, signal);
   let cachedLyrics = null;
   while (true) {
@@ -556,29 +589,7 @@ async function songMenu(rl, api, song, context) {
       continue;
     }
     if (/^(?:p|play|播放)$/i.test(action)) {
-      const result = await api.songUrl(song.id, { signal });
-      if (!result?.url) {
-        console.log(unavailableUrlMessage(result, authState));
-        console.log(`诊断日志：${logger.file}`);
-        continue;
-      }
-      cachedLyrics ||= await api.lyrics(song.id, { signal });
-      await playWithProgress({
-        song,
-        url: result.url,
-        durationMs: song.durationMs,
-        lyricSource: cachedLyrics.original,
-        translatedLyricSource: cachedLyrics.translated,
-        lyricOffsetMs: context.settings.lyricOffsetMs,
-        smtcOffsetMs: context.settings.smtcOffsetMs,
-        signal,
-        logger,
-        rl,
-        onOffsetChange: (value) => persistPlaybackOffset(
-          context.settings, value, logger, 'playback_hotkey'
-        ),
-        onInterrupt: () => shutdown('playback_ctrl_c')
-      });
+      cachedLyrics = await playSong(api, song, context, rl, cachedLyrics);
       continue;
     }
     console.log('未知选项，请输入 p、l、u 或 q。');
@@ -688,9 +699,12 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
       context.settings, value, context.logger, 'playback_hotkey'
     ),
     onInterrupt: () => context.shutdown('playback_ctrl_c'),
-    onTrackChange: async (targetIndex, cause) => {
+    onTrackChange: async (targetIndex, cause, transitionSignal) => {
       const step = targetIndex < activeIndex ? -1 : 1;
       const next = await findPlayable(targetIndex, step, cause === 'select');
+      if (transitionSignal?.aborted) {
+        throw transitionSignal.reason || new DOMException('切歌操作已取消', 'AbortError');
+      }
       if (!next) return null;
       activeIndex = next.index;
       prefetchAdjacent(activeIndex);
@@ -844,17 +858,23 @@ async function listUserPlaylists(rl, api, context) {
 
 async function chooseSong(rl, api, songs, context) {
   if (input.isTTY && output.isTTY && typeof input.setRawMode === 'function') {
-    const selectedIndex = await selectTerminalList({
+    const selection = await selectTerminalList({
       rl,
       items: songs,
       title: '搜索结果',
-      hint: '↑/↓ 或滚轮选择  Enter 查看  q/Esc 返回主页',
+      hint: '↑/↓ 或滚轮选择  Enter 查看  空格 播放  q/Esc 返回主页',
+      alternateAction: 'play',
       itemText: (song, index) => `${String(index + 1).padStart(2)}. ${song.name} — ${song.artists.join('/') || '未知歌手'} [${song.id}] ${formatDuration(song.durationMs)}`,
       signal: context.signal,
       onInterrupt: () => context.shutdown('search_list_ctrl_c')
     });
-    if (selectedIndex == null) return;
+    if (selection == null) return;
+    const selectedIndex = typeof selection === 'number' ? selection : selection.index;
     const detail = await api.songDetail(songs[selectedIndex].id, { signal: context.signal });
+    if (typeof selection === 'object' && selection.action === 'play') {
+      await playSong(api, detail, context, rl);
+      return;
+    }
     await songMenu(rl, api, detail, context);
     return;
   }
@@ -1067,7 +1087,7 @@ export async function main(args = []) {
       const prompt = authState.loggedIn ? '\n搜索歌曲、输入 ID 点歌 > ' : '\n搜索歌曲、输入 ID 点歌，或 /login > ';
       let raw;
       try {
-        raw = (await ask(rl, chalk.green(prompt), controller.signal)).trim();
+        raw = (await ask(rl, chalk.green(prompt), controller.signal, { recordHistory: true })).trim();
       } catch (error) {
         if (isAbortError(error) || controller.signal.aborted) break;
         throw error;

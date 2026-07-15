@@ -26,6 +26,7 @@ export function terminalListAction(buffer) {
   if (key === '\x03') return { type: 'interrupt' };
   if (key === 'q' || key === 'Q' || key === '\x1b') return { type: 'cancel' };
   if (key.includes('\r') || key.includes('\n')) return { type: 'select' };
+  if (key === ' ') return { type: 'alternate' };
   const wheel = /\x1b\[<(\d+);\d+;\d+([Mm])/.exec(key);
   if (wheel) {
     const button = Number(wheel[1]);
@@ -68,6 +69,7 @@ export async function selectTerminalList({
   initialIndex = 0,
   title = '请选择',
   hint = '↑/↓ 或滚轮选择  Enter 查看  q/Esc 返回',
+  alternateAction = null,
   itemText = (item) => String(item),
   signal,
   onInterrupt,
@@ -89,7 +91,7 @@ export async function selectTerminalList({
     const viewport = terminalListViewport(items.length, selectedIndex, Math.max(1, rows - 3), viewportStart);
     viewportStart = viewport.start;
     selectedIndex = viewport.selectedIndex;
-    const lines = [chalk.bold(truncatePlain(title, columns)), chalk.gray(truncatePlain(hint, columns))];
+    const lines = [chalk.cyanBright.bold(truncatePlain(title, columns)), chalk.whiteBright(truncatePlain(hint, columns))];
     for (let index = viewport.start; index < viewport.end; index += 1) {
       const prefix = index === selectedIndex ? '› ' : '  ';
       const line = truncatePlain(`${prefix}${itemText(items[index], index)}`, columns);
@@ -108,6 +110,7 @@ export async function selectTerminalList({
     if (action.type === 'interrupt') onInterrupt?.();
     else if (action.type === 'cancel') finish(null);
     else if (action.type === 'select') finish(selectedIndex);
+    else if (action.type === 'alternate' && alternateAction) finish({ index: selectedIndex, action: alternateAction });
     else if (action.type === 'move') {
       selectedIndex = clamp(selectedIndex + action.delta, 0, items.length - 1);
       render();

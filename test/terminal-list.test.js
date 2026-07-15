@@ -18,10 +18,39 @@ test('终端列表解析方向键、滚轮、确认和返回', () => {
   assert.deepEqual(terminalListAction('\x1b[<65;10;5M'), { type: 'move', delta: 1 });
   assert.deepEqual(terminalListAction('\x1b[<64;10;5m'), { type: 'ignore' });
   assert.deepEqual(terminalListAction('\r'), { type: 'select' });
+  assert.deepEqual(terminalListAction(' '), { type: 'alternate' });
   assert.deepEqual(terminalListAction('q'), { type: 'cancel' });
   assert.deepEqual(terminalListAction('\x1b'), { type: 'cancel' });
   assert.deepEqual(terminalListAction('\x03'), { type: 'interrupt' });
   assert.deepEqual(terminalListAction('x'), { type: 'ignore' });
+});
+
+test('终端列表仅在启用备用动作时允许空格确认', async () => {
+  class FakeInput extends EventEmitter {
+    isTTY = true;
+    isRaw = false;
+    paused = false;
+    setRawMode(value) { this.isRaw = value; }
+    pause() { this.paused = true; }
+    resume() { this.paused = false; }
+    isPaused() { return this.paused; }
+  }
+  class FakeOutput extends EventEmitter {
+    isTTY = true;
+    rows = 8;
+    columns = 80;
+    chunks = [];
+    write(chunk) { this.chunks.push(String(chunk)); return true; }
+  }
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const rl = { pause() {}, resume() {}, write() {} };
+  const selection = selectTerminalList({
+    rl, items: ['一'], alternateAction: 'play', input, output
+  });
+  setImmediate(() => input.emit('data', Buffer.from(' ')));
+  assert.deepEqual(await selection, { index: 0, action: 'play' });
+  assert.match(output.chunks.join(''), /空格|请选择/);
 });
 
 test('终端列表退出时恢复 raw mode、监听器和终端模式', async () => {
