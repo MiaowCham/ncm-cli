@@ -141,11 +141,18 @@ export function createPlaybackClock(durationMs, now = () => performance.now()) {
   };
 }
 
-export function nextRefreshDelay(elapsedMs, lyricLines, paused = false) {
+export function lyricPosition(elapsedMs, lyricOffsetMs = 2000) {
+  const elapsed = Number(elapsedMs);
+  const offset = Number(lyricOffsetMs);
+  return (Number.isFinite(elapsed) ? elapsed : 0) - (Number.isFinite(offset) ? offset : 2000);
+}
+
+export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOffsetMs = 0) {
   if (paused) return 1000;
   const toNextSecond = 1000 - (Math.floor(elapsedMs) % 1000 || 0);
-  const nextLyric = lyricLines.find((line) => line.timeMs > elapsedMs);
-  const toNextLyric = nextLyric ? nextLyric.timeMs - elapsedMs : Infinity;
+  const lyricElapsedMs = lyricPosition(elapsedMs, lyricOffsetMs);
+  const nextLyric = lyricLines.find((line) => line.timeMs > lyricElapsedMs);
+  const toNextLyric = nextLyric ? nextLyric.timeMs - lyricElapsedMs : Infinity;
   return clamp(Math.min(toNextSecond, toNextLyric), 20, 1000);
 }
 
@@ -267,7 +274,7 @@ function setupRawInput(rl, onData) {
   };
 }
 
-function renderDynamic({ elapsedMs, durationMs, paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator }) {
+function renderDynamic({ elapsedMs, lyricElapsedMs, durationMs, paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator }) {
   const columns = Math.max(1, process.stdout.columns || 80);
   const rows = Math.max(1, process.stdout.rows || 24);
   const startRow = clamp(dynamicRow, 1, rows);
@@ -283,7 +290,7 @@ function renderDynamic({ elapsedMs, durationMs, paused, lyrics, dynamicRow, dyna
   const indicatorRow = indicator ? chalk.yellow(truncateText(indicator, columns)) : shortcuts;
   // 进度、快捷键指示栏和其后空行固定占三行。
   const lyricCapacity = Math.max(0, availableRows - 3);
-  const displayRows = playbackLyricRows(lyrics, elapsedMs, lyricCapacity, showTranslation);
+  const displayRows = playbackLyricRows(lyrics, lyricElapsedMs, lyricCapacity, showTranslation);
   const lyricRows = displayRows.length
     ? displayRows.map((line) => {
         const text = truncateText(line.text, columns);
@@ -443,7 +450,7 @@ export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
   }
 }
 
-export async function playWithProgress({ song, url, durationMs, lyricSource = '', translatedLyricSource = '', signal, logger, rl, onInterrupt }) {
+export async function playWithProgress({ song, url, durationMs, lyricSource = '', translatedLyricSource = '', lyricOffsetMs = 2000, signal, logger, rl, onInterrupt }) {
   const player = findPlayer();
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
@@ -505,11 +512,12 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     if (!tty || finished) return;
     if (refreshTimer) clearTimeout(refreshTimer);
     const elapsedMs = clock.position();
+    const lyricElapsedMs = lyricPosition(elapsedMs, lyricOffsetMs);
     const now = performance.now();
     if (indicator && now >= indicatorUntil) indicator = '';
-    renderDynamic({ elapsedMs, durationMs, paused: clock.paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator });
+    renderDynamic({ elapsedMs, lyricElapsedMs, durationMs, paused: clock.paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator });
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
-    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(elapsedMs, lyrics, clock.paused), indicatorDelay));
+    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(elapsedMs, lyrics, clock.paused, lyricOffsetMs), indicatorDelay));
   };
 
   const setIndicator = (text) => {

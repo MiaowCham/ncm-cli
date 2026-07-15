@@ -30,6 +30,17 @@ export function parseQualityCommand(input) {
   return { level: match[1]?.trim().toLowerCase() || null };
 }
 
+export function parseOffsetCommand(input) {
+  const match = input.trim().match(/^\/offset(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  const argument = match[1]?.trim();
+  if (!argument) return { milliseconds: null };
+  if (!/^[+-]?\d+$/.test(argument)) {
+    return { milliseconds: null, error: '歌词偏移量必须是整数毫秒' };
+  }
+  return { milliseconds: Number(argument) };
+}
+
 export function parseLyricAction(input) {
   const match = input.trim().match(/^\/?(?:l|lyric|歌词)(?:\s*(?:>|\|)\s*(.+))?$/i);
   if (!match) return null;
