@@ -136,8 +136,10 @@ static async Task<bool> RunIntegrationTestAsync()
     }
 
     using var bridge = new SmtcBridge();
+    var receivedControls = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    bridge.ControlReceived += receivedControls.Enqueue;
     using var initialize = JsonDocument.Parse("""
-        {"controls":{"play":true,"pause":true,"stop":true,"seek":true,"rewind":true,"fastForward":true}}
+        {"controls":{"play":true,"pause":true,"stop":true,"seek":true,"rewind":true,"fastForward":true,"previous":true,"next":true}}
         """);
     bridge.Initialize(initialize.RootElement);
 
@@ -173,24 +175,47 @@ static async Task<bool> RunIntegrationTestAsync()
 
                 var timeline = session.GetTimelineProperties();
                 var status = session.GetPlaybackInfo().PlaybackStatus.ToString();
-                ulong thumbnailBytes = 0;
-                if (media.Thumbnail is not null)
+                var sourceAppUserModelId = session.SourceAppUserModelId;
+                // 验证歌曲已结束（Stopped）后，歌单的上一首/下一首仍能由系统发送。
+                using var endedPlayback = JsonDocument.Parse(JsonSerializer.Serialize(new
                 {
-                    using var thumbnail = await media.Thumbnail.OpenReadAsync();
+                    status = "stopped",
+                    positionMs = expectedDurationMs,
+                    durationMs = expectedDurationMs
+                }));
+                bridge.UpdatePlayback(endedPlayback.RootElement);
+                // WinRT 会话对象具有 apartment 约束：在任何 await 前先创建所有操作，
+                // 避免继续位于线程池时再次访问 session 引发 RPC_E_WRONG_THREAD。
+                var nextRequest = session.TrySkipNextAsync();
+                var previousRequest = session.TrySkipPreviousAsync();
+                var thumbnailRequest = media.Thumbnail?.OpenReadAsync();
+                var nextAccepted = await nextRequest;
+                var previousAccepted = await previousRequest;
+                var received = await WaitForControlsAsync(receivedControls, ["next", "previous"]);
+                var nextReceived = received.Contains("next");
+                var previousReceived = received.Contains("previous");
+                ulong thumbnailBytes = 0;
+                if (thumbnailRequest is not null)
+                {
+                    using var thumbnail = await thumbnailRequest;
                     thumbnailBytes = thumbnail.Size;
                 }
                 var result = new
                 {
                     type = "integrationTest",
                     visible = true,
-                    sourceAppUserModelId = session.SourceAppUserModelId,
+                    sourceAppUserModelId,
                     title = media.Title,
                     artist = media.Artist,
                     album = media.AlbumTitle,
                     thumbnailBytes,
                     playbackStatus = status,
                     positionMs = (long)timeline.Position.TotalMilliseconds,
-                    durationMs = (long)timeline.EndTime.TotalMilliseconds
+                    durationMs = (long)timeline.EndTime.TotalMilliseconds,
+                    nextAccepted,
+                    nextReceived,
+                    previousAccepted,
+                    previousReceived
                 };
                 Console.Out.WriteLine(JsonSerializer.Serialize(result));
 
@@ -199,7 +224,8 @@ static async Task<bool> RunIntegrationTestAsync()
                     thumbnailBytes > 0 &&
                     string.Equals(status, "Playing", StringComparison.OrdinalIgnoreCase) &&
                     Math.Abs(timeline.Position.TotalMilliseconds - expectedPositionMs) < 1_000 &&
-                    Math.Abs(timeline.EndTime.TotalMilliseconds - expectedDurationMs) < 1_000;
+                    Math.Abs(timeline.EndTime.TotalMilliseconds - expectedDurationMs) < 1_000 &&
+                    nextAccepted && nextReceived && previousAccepted && previousReceived;
                 CleanupCover();
                 return passed;
             }
@@ -229,4 +255,26 @@ static async Task<bool> RunIntegrationTestAsync()
         CleanupCover();
         return false;
     }
+}
+
+static async Task<HashSet<string>> WaitForControlsAsync(
+    System.Collections.Concurrent.ConcurrentQueue<string> controls,
+    IEnumerable<string> expected,
+    int timeoutMs = 2_000)
+{
+    var remaining = new HashSet<string>(expected, StringComparer.Ordinal);
+    var received = new HashSet<string>(StringComparer.Ordinal);
+    var deadline = Environment.TickCount64 + timeoutMs;
+    while (remaining.Count > 0 && Environment.TickCount64 < deadline)
+    {
+        while (controls.TryDequeue(out var action))
+        {
+            if (remaining.Remove(action))
+            {
+                received.Add(action);
+            }
+        }
+        await Task.Delay(25);
+    }
+    return received;
 }

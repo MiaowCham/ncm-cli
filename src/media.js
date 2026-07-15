@@ -9,6 +9,14 @@ import { parseLrc } from './lyrics.js';
 import { createSmtcBridge } from './smtc.js';
 
 let cachedWindowsTerminalVersion;
+let retainedSmtcBridge = null;
+
+/** 关闭单曲自然结束后为系统媒体面板保留的最后一个 SMTC 会话。 */
+export async function closeRetainedSmtc() {
+  const bridge = retainedSmtcBridge;
+  retainedSmtcBridge = null;
+  await bridge?.close();
+}
 
 function commandExists(command) {
   const probe = process.platform === 'win32' ? 'where.exe' : 'which';
@@ -216,6 +224,45 @@ function truncateText(text, width) {
   return `${output}…`;
 }
 
+/** 按终端显示宽度换行；宽字符不会被拆成半个单元格。 */
+export function wrapTerminalText(text, width) {
+  const safeWidth = Math.max(1, Math.floor(Number(width) || 1));
+  const rows = [];
+  let row = '';
+  for (const character of String(text ?? '')) {
+    if (character === '\n') {
+      rows.push(row);
+      row = '';
+      continue;
+    }
+    const characterWidth = stringWidth(character);
+    if (row && stringWidth(row) + characterWidth > safeWidth) {
+      rows.push(row.trimEnd());
+      row = '';
+    }
+    // 极窄终端遇到比一列更宽的字符时仍应保留字符，而不是死循环或丢失。
+    row += character;
+  }
+  if (row || !rows.length) rows.push(row.trimEnd());
+  return rows;
+}
+
+export function playbackShortcutRows(options = {}, width = 80) {
+  return wrapTerminalText(playbackShortcutText(options), width);
+}
+
+/** SMTC 使用物理歌曲时长；offset 只修正对外报告的位置。 */
+export function smtcTimeline(rawPositionMs, durationMs, offsetMs = 0) {
+  const duration = Math.max(0, Number.isFinite(Number(durationMs)) ? Number(durationMs) : 0);
+  const raw = clamp(Number.isFinite(Number(rawPositionMs)) ? Number(rawPositionMs) : 0, 0, duration);
+  return {
+    // 物理媒体已经到达终点时必须报告完整结束位置，
+    // 避免正偏移让系统媒体面板误以为尾部被截断。
+    positionMs: raw >= duration ? duration : clamp(displayPosition(raw, offsetMs), 0, duration),
+    durationMs: duration
+  };
+}
+
 export function lyricViewport(lines, elapsedMs, capacity) {
   if (!lines.length || capacity <= 0) return [];
   let currentIndex = -1;
@@ -398,10 +445,14 @@ function renderDynamic({
   const progressText = truncateText(`[${bar}] ${timeText}${paused ? '  [已暂停]' : ''}`, columns);
   const progress = paused ? chalk.yellow(progressText) : progressText;
   const shortcutText = playbackShortcutText({ playlistOpen, hasPlaylist: Boolean(playlist?.tracks?.length) });
-  const shortcuts = chalk.cyan(truncateText(shortcutText, columns));
-  const indicatorRow = indicator ? chalk.yellow(truncateText(indicator, columns)) : shortcuts;
-  // 进度、快捷键指示栏和其后空行固定占三行。
-  const lyricCapacity = Math.max(0, availableRows - 3);
+  const indicatorRows = indicator
+    ? [chalk.yellow(truncateText(indicator, columns))]
+    : playbackShortcutRows({ playlistOpen, hasPlaylist: Boolean(playlist?.tracks?.length) }, columns)
+      .map((row) => chalk.cyan(row));
+  // 进度、可变行数快捷键提示和其后空行共同占用播放区。
+  const chromeRows = 1 + Math.min(indicatorRows.length, Math.max(0, availableRows - 1))
+    + (availableRows > 1 + indicatorRows.length ? 1 : 0);
+  const lyricCapacity = Math.max(0, availableRows - chromeRows);
   let contentRows;
   if (playlistOpen) {
     const title = truncateText(`歌单：${playlist?.name || '当前播放队列'}`, columns);
@@ -428,8 +479,8 @@ function renderDynamic({
       : lyricCapacity > 0 ? [chalk.gray(truncateText('暂无逐行歌词', columns))] : [];
   }
   const outputRows = [progress];
-  if (availableRows > 1) outputRows.push(indicatorRow);
-  if (availableRows > 2) outputRows.push('');
+  outputRows.push(...indicatorRows.slice(0, Math.max(0, availableRows - 1)));
+  if (outputRows.length < availableRows) outputRows.push('');
   outputRows.push(...contentRows);
   const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
   process.stdout.write(`${position}\x1b[0J${outputRows.join('\n')}`);
@@ -508,10 +559,13 @@ async function tryNativeGraphics(buffer, width, height) {
   return true;
 }
 
-export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
+export async function tryRenderImage(source, { signal, size = 'detail', shouldRender } = {}) {
   if (!source || !process.stdout.isTTY) return 0;
+  const guarded = typeof shouldRender === 'function';
+  const current = () => !signal?.aborted && (!guarded || shouldRender());
   try {
     const buffer = await loadImage(source, signal);
+    if (!current()) return 0;
     const columns = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
     const width = Math.max(1, Math.min(size === 'playback' ? 52 : 56, columns - 2));
@@ -525,7 +579,11 @@ export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
     });
 
     for (const protocol of protocols) {
+      if (!current()) return 0;
       if (protocol === 'native') {
+        // terminal-image 的 Kitty 路径可能在 Promise 返回前直接写 stdout，
+        // 无法为连续切歌做 generation 校验；可取消的后台封面任务跳过该路径。
+        if (guarded) continue;
         try {
           if (await tryNativeGraphics(buffer, width, height)) return height;
         } catch {}
@@ -539,6 +597,7 @@ export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
             maxBuffer: 4 * 1024 * 1024
           });
           if (rendered.status === 0 && rendered.stdout?.includes(Buffer.from('\x1bP'))) {
+            if (!current()) return 0;
             await writeTerminalOutput(rendered.stdout);
             // chafa 已在 SIXEL 结束后输出光标移动。Windows Terminal 还会根据
             // 实际图像像素高度定位光标，额外按请求高度补行会造成双重占位。
@@ -557,6 +616,7 @@ export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
           });
           if (rendered.status === 0 && rendered.stdout?.trim()) {
             const text = rendered.stdout.replace(/\s+$/, '');
+            if (!current()) return 0;
             await writeTerminalOutput(`${text}\n`);
             return text.split(/\r?\n/).length;
           }
@@ -566,6 +626,7 @@ export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
       if (protocol === 'ansi') {
         try {
           const text = await renderAnsiBlocks(buffer, width, height);
+          if (!current()) return 0;
           await writeTerminalOutput(`${text}\n`);
           return text.split(/\r?\n/).length;
         } catch {}
@@ -584,26 +645,35 @@ export async function playWithProgress({
   lyricSource = '',
   translatedLyricSource = '',
   lyricOffsetMs = 2000,
+  smtcOffsetMs = 0,
   playlist = { name: '', tracks: [], currentIndex: 0 },
   signal,
   logger,
   rl,
   onInterrupt,
-  onOffsetChange
+  onOffsetChange,
+  onTrackChange
 }) {
+  await closeRetainedSmtc();
   const player = findPlayer();
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
-  const lyrics = attachLyricTranslations(parseLrc(lyricSource), parseLrc(translatedLyricSource));
-  const clock = createPlaybackClock(durationMs);
+  let activeSong = song;
+  let activeUrl = url;
+  let activeDurationMs = durationMs;
+  let lyrics = attachLyricTranslations(parseLrc(lyricSource), parseLrc(translatedLyricSource));
+  let clock = createPlaybackClock(activeDurationMs);
+  // 创建 bridge、下载封面等准备工作不应计入真实播放位置。
+  clock.pause();
   let activeOffsetMs = adjustPlaybackOffset(lyricOffsetMs, 0);
+  const activeSmtcOffsetMs = Number.isFinite(Number(smtcOffsetMs)) ? Number(smtcOffsetMs) : 0;
   let volume = 100;
-  const hasTranslation = lyrics.some((line) => Boolean(line.translation));
+  let hasTranslation = lyrics.some((line) => Boolean(line.translation));
   let showTranslation = hasTranslation;
   let indicator = '';
   let indicatorUntil = 0;
   const playlistTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
-  const playlistCurrentIndex = playlistTracks.length
+  let playlistCurrentIndex = playlistTracks.length
     ? clamp(Math.floor(Number(playlist?.currentIndex) || 0), 0, playlistTracks.length - 1)
     : -1;
   const playbackPlaylist = { name: playlist?.name || '', tracks: playlistTracks, currentIndex: playlistCurrentIndex };
@@ -615,10 +685,16 @@ export async function playWithProgress({
   let smtcTimer = null;
   let dynamicRow = 1;
   let dynamicAnchored = false;
+  let headerRendering = false;
+  let headerRenderId = 0;
+  let headerAbortController = null;
   let dispatchPlaybackAction = () => {};
+  let sessionControlsEnabled = true;
+  let sessionEnded = false;
+  let retainSmtc = false;
   const smtc = await createSmtcBridge({
-    song,
-    durationMs: Math.max(0, displayPosition(durationMs, activeOffsetMs)),
+    song: activeSong,
+    durationMs: activeDurationMs,
     playlistControls: playlistTracks.length > 0,
     canPrevious: playlistCurrentIndex > 0,
     canNext: playlistCurrentIndex >= 0 && playlistCurrentIndex < playlistTracks.length - 1,
@@ -633,15 +709,20 @@ export async function playWithProgress({
     rejectCompletion = reject;
   });
 
-  const updateSmtc = (status, rawPositionMs = clock.position()) => smtc.updatePlayback({
-    status,
-    positionMs: Math.max(0, displayPosition(rawPositionMs, activeOffsetMs)),
-    durationMs: Math.max(0, displayPosition(durationMs, activeOffsetMs))
+  const updateSmtcControls = () => smtc.updateControls({
+    canPrevious: playlistCurrentIndex > 0,
+    canNext: playlistCurrentIndex >= 0 && playlistCurrentIndex < playlistTracks.length - 1
   });
 
+  const updateSmtc = (status, rawPositionMs = clock.position()) => {
+    const timeline = smtcTimeline(rawPositionMs, activeDurationMs, activeOffsetMs + activeSmtcOffsetMs);
+    return smtc.updatePlayback({ status, ...timeline });
+  };
+
   const spawnAt = (positionMs) => {
-    const instance = spawn(player.command, player.args(url, positionMs / 1000, volume), { stdio: 'ignore', windowsHide: true });
+    const instance = spawn(player.command, player.args(activeUrl, positionMs / 1000, volume), { stdio: 'ignore', windowsHide: true });
     child = instance;
+    sessionEnded = false;
     updateSmtc('playing', positionMs);
     void logger?.info('player_spawn', { player: player.command, pid: instance.pid, positionMs });
     instance.once('error', (error) => {
@@ -650,9 +731,8 @@ export async function playWithProgress({
     instance.once('exit', (code, exitSignal) => {
       void logger?.info('player_exit', { player: player.command, code, signal: exitSignal });
       if (!finished && child === instance && !intentionalStops.has(instance)) {
-        finished = true;
-        updateSmtc('stopped');
-        resolveCompletion('ended');
+        child = null;
+        enqueue(() => handleNaturalEnd());
       }
     });
   };
@@ -665,12 +745,23 @@ export async function playWithProgress({
     await terminatePlayer(instance);
   };
 
+  const restartAt = async (positionMs) => {
+    const wasPaused = clock.paused;
+    if (!wasPaused) clock.pause();
+    await stopCurrent();
+    clock.seekTo(positionMs);
+    if (!wasPaused) {
+      spawnAt(positionMs);
+      clock.resume();
+    }
+  };
+
   const render = () => {
-    if (!tty || finished) return;
+    if (!tty || finished || headerRendering) return;
     if (refreshTimer) clearTimeout(refreshTimer);
     const rawElapsedMs = clock.position();
-    const elapsedMs = displayPosition(rawElapsedMs, activeOffsetMs);
-    const displayDurationMs = Math.max(0, displayPosition(durationMs, activeOffsetMs));
+    const elapsedMs = sessionEnded ? activeDurationMs : displayPosition(rawElapsedMs, activeOffsetMs);
+    const displayDurationMs = activeDurationMs;
     const lyricElapsedMs = elapsedMs;
     const now = performance.now();
     if (indicator && now >= indicatorUntil) indicator = '';
@@ -716,7 +807,161 @@ export async function playWithProgress({
     resolveCompletion(reason);
   });
 
+  const drawHeader = async () => {
+    if (!tty) return;
+    headerAbortController?.abort();
+    const renderId = ++headerRenderId;
+    const controller = new AbortController();
+    headerAbortController = controller;
+    const headerSignal = signal
+      ? AbortSignal.any([signal, controller.signal])
+      : controller.signal;
+    const songSnapshot = activeSong;
+    headerRendering = true;
+    dynamicAnchored = false;
+    process.stdout.write('\x1b[2J\x1b[H');
+    const initialRows = Math.max(1, process.stdout.rows || 24);
+    const initialColumns = Math.max(1, process.stdout.columns || 80);
+    const coverRows = initialRows >= 10
+      ? await tryRenderImage(songSnapshot.cover, {
+          signal: headerSignal,
+          size: 'playback',
+          shouldRender: () => renderId === headerRenderId && !finished
+        })
+      : 0;
+    if (controller.signal.aborted || renderId !== headerRenderId || finished) return;
+    const artists = Array.isArray(songSnapshot.artists) ? songSnapshot.artists.join('/') : songSnapshot.artist;
+    const metadata = [
+      chalk.bold(truncateText(songSnapshot.name || songSnapshot.title || '', initialColumns)),
+      truncateText(`歌手：${artists || '未知'}`, initialColumns),
+      truncateText(`专辑：${songSnapshot.album || '未知'}`, initialColumns),
+      truncateText(`ID：${songSnapshot.id ?? ''}`, initialColumns)
+    ];
+    const metadataCapacity = Math.max(0, initialRows - coverRows - 1);
+    for (const line of metadata.slice(0, metadataCapacity)) console.log(line);
+    dynamicRow = Math.min(initialRows, coverRows + Math.min(metadata.length, metadataCapacity) + 1);
+    process.stdout.write('\x1b[s');
+    dynamicAnchored = true;
+    headerRendering = false;
+    render();
+  };
+
+  const transitionTo = async (targetIndex, cause = 'manual') => {
+    if (!playlistTracks.length || targetIndex < 0 || targetIndex >= playlistTracks.length) return false;
+    const sameTrack = targetIndex === playlistCurrentIndex;
+    if (!sameTrack && typeof onTrackChange !== 'function') {
+      // 兼容旧调用方：没有加载回调时仍返回原有的切歌结果。
+      finished = true;
+      resolveCompletion({
+        type: cause === 'select' ? 'playlist_select'
+          : targetIndex < playlistCurrentIndex ? 'playlist_previous' : 'playlist_next',
+        ...(cause === 'select' ? { index: targetIndex } : {})
+      });
+      return false;
+    }
+
+    const oldPosition = clock.position();
+    const wasPlaying = Boolean(child && !clock.paused);
+    setIndicator(`正在切换到 ${targetIndex + 1}/${playlistTracks.length}`);
+    render();
+    if (wasPlaying) clock.pause();
+    // 用户发出切歌请求后先立即停止声音；网络加载时间不会继续吞掉旧曲时间。
+    await stopCurrent();
+    let next = sameTrack ? {
+      song: activeSong,
+      url: activeUrl,
+      durationMs: activeDurationMs,
+      lyricSource: '',
+      translatedLyricSource: '',
+      lyrics
+    } : null;
+    if (!sameTrack) {
+      try {
+        next = await onTrackChange(targetIndex, cause);
+      } catch (error) {
+        void logger?.warn('playlist_track_change_failed', { targetIndex, error });
+        setIndicator('切歌失败，已保留当前歌曲');
+        if (wasPlaying) {
+          spawnAt(oldPosition);
+          clock.resume();
+        }
+        return false;
+      }
+      if (!next?.url || !next?.song) {
+        setIndicator('目标歌曲暂时无法播放');
+        if (wasPlaying) {
+          spawnAt(oldPosition);
+          clock.resume();
+        }
+        return false;
+      }
+    }
+
+    const resolvedIndex = Number.isInteger(next.index)
+      ? clamp(next.index, 0, playlistTracks.length - 1)
+      : targetIndex;
+    activeSong = next.song;
+    activeUrl = next.url;
+    activeDurationMs = Math.max(0, Number(next.durationMs ?? next.song.durationMs) || 0);
+    lyrics = Array.isArray(next.lyrics) ? next.lyrics : attachLyricTranslations(
+      parseLrc(next.lyricSource ?? next.lyrics?.original ?? ''),
+      parseLrc(next.translatedLyricSource ?? next.lyrics?.translated ?? '')
+    );
+    hasTranslation = lyrics.some((line) => Boolean(line.translation));
+    showTranslation = hasTranslation;
+    playlistCurrentIndex = resolvedIndex;
+    playbackPlaylist.currentIndex = resolvedIndex;
+    playlistSelection = resolvedIndex;
+    playlistOpen = false;
+    sessionEnded = false;
+    clock = createPlaybackClock(activeDurationMs);
+    clock.pause();
+    await smtc.setMetadata({
+      ...activeSong,
+      durationMs: activeDurationMs,
+      cover: activeSong.cover ?? null,
+      coverUri: activeSong.cover ?? null
+    });
+    updateSmtcControls();
+    spawnAt(0);
+    clock.resume();
+    // 新音频先开始播放；封面在可取消的后台任务中绘制，
+    // 不占用按键和 SMTC 共用的串行控制队列。
+    void drawHeader().catch((error) => {
+      if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
+    });
+    setIndicator(`正在播放 ${resolvedIndex + 1}/${playlistTracks.length}`);
+    return true;
+  };
+
+  const handleNaturalEnd = async () => {
+    clock.pause();
+    clock.seekTo(activeDurationMs);
+    updateSmtc('stopped', activeDurationMs);
+    if (playlistTracks.length && playlistCurrentIndex < playlistTracks.length - 1) {
+      // 自然连播时跳过临时不可用的歌曲，直到找到下一首可播放曲目。
+      for (let targetIndex = playlistCurrentIndex + 1; targetIndex < playlistTracks.length; targetIndex += 1) {
+        if (await transitionTo(targetIndex, 'natural')) return;
+        if (finished) return;
+      }
+    }
+    sessionEnded = true;
+    updateSmtcControls();
+    if (playlistTracks.length) {
+      setIndicator('歌单播放完毕');
+      return;
+    }
+    // 单曲自然结束后保留最后元数据与最终时间戳，但不再处理系统控制。
+    sessionControlsEnabled = false;
+    smtc.updateControls({ canPrevious: false, canNext: false });
+    retainSmtc = true;
+    retainedSmtcBridge = smtc;
+    finished = true;
+    resolveCompletion('ended');
+  };
+
   dispatchPlaybackAction = (action) => {
+    if (!sessionControlsEnabled && action.action) return;
     if (action.type === 'interrupt') {
       onInterrupt?.();
       return;
@@ -730,7 +975,12 @@ export async function playWithProgress({
       if (playlistTracks.length) {
         const type = action.action === 'previous' ? 'playlist_previous'
           : action.action === 'next' ? 'playlist_next' : action.type;
-        finish({ type });
+        const delta = type === 'playlist_previous' ? -1 : 1;
+        enqueue(() => {
+          const targetIndex = playlistCurrentIndex + delta;
+          if (targetIndex < 0 || targetIndex >= playlistTracks.length) return false;
+          return transitionTo(targetIndex, 'control');
+        });
       }
       return;
     }
@@ -757,17 +1007,25 @@ export async function playWithProgress({
     }
     if (action.type === 'playlist_select') {
       if (playlistOpen && Number.isInteger(action.index) && action.index >= 0 && action.index < playlistTracks.length) {
-        finish({ type: 'playlist_select', index: action.index });
+        enqueue(() => transitionTo(action.index, 'select'));
       }
       return;
     }
     if (action.type === 'toggle_pause' || action.action === 'play' || action.action === 'pause') {
       enqueue(async () => {
+        if (sessionEnded && (action.action === 'play' || action.type === 'toggle_pause')) {
+          clock.seekTo(0);
+          spawnAt(0);
+          clock.resume();
+          setIndicator('重新播放');
+          return;
+        }
         const shouldPlay = action.action === 'play' || (action.type === 'toggle_pause' && clock.paused);
         const shouldPause = action.action === 'pause' || (action.type === 'toggle_pause' && !clock.paused);
         if (shouldPlay && clock.paused) {
-          const resumeAt = clock.resume();
+          const resumeAt = clock.position();
           spawnAt(resumeAt);
+          clock.resume();
           setIndicator('继续播放');
         } else if (shouldPause && !clock.paused) {
           clock.pause();
@@ -782,13 +1040,12 @@ export async function playWithProgress({
       enqueue(async () => {
         const deltaMs = action.action === 'fast_forward' ? 5000 : action.action === 'rewind' ? -5000 : action.deltaMs;
         const seekTo = action.action === 'seek_absolute'
-          ? clock.seekTo(rawPosition(action.positionMs, activeOffsetMs, durationMs))
+          ? clock.seekTo(rawPosition(action.positionMs, activeOffsetMs + activeSmtcOffsetMs, activeDurationMs))
           : clock.seek(deltaMs);
         if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, activeOffsetMs))}`);
         else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
         if (!clock.paused) {
-          await stopCurrent();
-          spawnAt(seekTo);
+          await restartAt(seekTo);
         } else {
           updateSmtc('paused', seekTo);
         }
@@ -801,8 +1058,7 @@ export async function playWithProgress({
         setIndicator(`音量 ${volume}%`);
         if (!clock.paused) {
           const position = clock.position();
-          await stopCurrent();
-          spawnAt(position);
+          await restartAt(position);
         }
       });
       return;
@@ -843,24 +1099,7 @@ export async function playWithProgress({
   try {
     if (tty) {
       process.stdout.write(`\x1b[?1049h${playbackTerminalModeSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
-      const initialRows = Math.max(1, process.stdout.rows || 24);
-      const initialColumns = Math.max(1, process.stdout.columns || 80);
-      const coverRows = initialRows >= 10
-        ? await tryRenderImage(song.cover, { signal, size: 'playback' })
-        : 0;
-      const metadata = [
-        chalk.bold(truncateText(song.name, initialColumns)),
-        truncateText(`歌手：${song.artists.join('/') || '未知'}`, initialColumns),
-        truncateText(`专辑：${song.album}`, initialColumns),
-        truncateText(`ID：${song.id}`, initialColumns)
-      ];
-      const metadataCapacity = Math.max(0, initialRows - coverRows - 1);
-      for (const line of metadata.slice(0, metadataCapacity)) console.log(line);
-      dynamicRow = Math.min(initialRows, coverRows + Math.min(metadata.length, metadataCapacity) + 1);
-      // 以实际输出结束位置为播放区锚点，避免 SIXEL 的像素高度与请求的
-      // 单元格高度不一致时，绝对行定位清掉元数据或留下大段空白。
-      process.stdout.write('\x1b[s');
-      dynamicAnchored = true;
+      await drawHeader();
       restoreInput = setupRawInput(rl, handleData);
       process.stdout.on('resize', resize);
     }
@@ -868,9 +1107,10 @@ export async function playWithProgress({
     if (signal?.aborted) abort();
     else {
       spawnAt(clock.position());
+      clock.resume();
       smtcTimer = setInterval(() => {
         if (!finished) {
-          updateSmtc(clock.paused ? 'paused' : 'playing');
+          updateSmtc(sessionEnded ? 'stopped' : clock.paused ? 'paused' : 'playing');
         }
       }, 1000);
       render();
@@ -880,12 +1120,15 @@ export async function playWithProgress({
     finished = true;
     if (refreshTimer) clearTimeout(refreshTimer);
     if (smtcTimer) clearInterval(smtcTimer);
+    headerAbortController?.abort();
     signal?.removeEventListener('abort', abort);
     process.stdout.removeListener('resize', resize);
     try {
       await stopCurrent();
-      updateSmtc('stopped');
-      await smtc.close();
+      if (!retainSmtc) {
+        updateSmtc('stopped');
+        await smtc.close();
+      }
     } finally {
       try { restoreInput(); } catch {}
       if (tty) {

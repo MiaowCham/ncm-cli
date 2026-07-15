@@ -50,6 +50,17 @@ export function parseOffsetCommand(input) {
   return { milliseconds: Number(argument) };
 }
 
+export function parseSmtcOffsetCommand(input) {
+  const match = input.trim().match(/^\/smtcoffset(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  const argument = match[1]?.trim();
+  if (!argument) return { milliseconds: null };
+  if (!/^[+-]?\d+$/.test(argument)) {
+    return { milliseconds: null, error: 'SMTC 额外偏移量必须是整数毫秒' };
+  }
+  return { milliseconds: Number(argument) };
+}
+
 export function parseApiCommand(input) {
   const match = input.trim().match(/^\/api(?:\s+([\s\S]+))?$/i);
   if (!match) return null;

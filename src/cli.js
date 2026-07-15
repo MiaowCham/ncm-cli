@@ -4,11 +4,12 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import chalk from 'chalk';
 import qrcode from 'qrcode-terminal';
+import { commandCompleter } from './completion.js';
 import { NcmApi, normalizeApiBaseUrl } from './api.js';
 import { clearCookie, loadCookie, saveCookie } from './cookie-store.js';
 import { mergeTranslatedLrc, plainLyrics } from './lyrics.js';
 import { Logger } from './logger.js';
-import { playWithProgress, tryRenderImage } from './media.js';
+import { closeRetainedSmtc, playWithProgress, tryRenderImage } from './media.js';
 import { parsePlaylistExportFormatSelection, playlistExportContent } from './playlist-export.js';
 import { selectTerminalList } from './terminal-list.js';
 import {
@@ -17,7 +18,7 @@ import {
 import {
   normalizeCookie, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
-  parseNumberSelection, parseOffsetCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
+  parseNumberSelection, parseOffsetCommand, parseSmtcOffsetCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
   parseListPlaylistsCommand, parsePlaylistCommand,
   parseApiCommand,
   QUALITY_LEVELS
@@ -54,6 +55,8 @@ ${chalk.bold('命令')}
   /quality <level>                        直接设置播放音质
   /offset                                 查看并设置播放时间偏移
   /offset <毫秒>                          直接设置播放时间偏移（默认 2000）
+  /smtcoffset                             查看并设置 SMTC 额外偏移
+  /smtcoffset <毫秒>                      直接设置 SMTC 额外偏移（默认 0）
   /api                                    查看并更换 API 地址
   /api <url>                              直接更换 API 地址
   /clear                                  清空终端并返回搜索
@@ -66,6 +69,7 @@ ${chalk.bold('命令')}
 歌单详情：p 播放，e 选择格式导出列表，u 歌单链接和封面链接，q 返回。
 播放页：q 停止返回，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，Ctrl+↑/↓ 调整偏移 50ms，t 开关翻译。
 歌单播放：p 打开/关闭播放列表，Ctrl+←/→ 切换歌曲；列表中 ↑/↓ 选择、Enter 播放。
+命令行：输入斜杠命令或参数前缀后按 Tab 自动补全。
 `);
 }
 
@@ -336,6 +340,42 @@ async function handleOffset(rl, settings, command, signal, logger) {
   }
 }
 
+async function setSmtcOffset(settings, milliseconds, logger) {
+  if (!Number.isInteger(milliseconds)
+      || milliseconds < MIN_LYRIC_OFFSET_MS || milliseconds > MAX_LYRIC_OFFSET_MS) {
+    console.log(`SMTC 额外偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒。`);
+    return false;
+  }
+  await saveSettings({ ...settings, smtcOffsetMs: milliseconds });
+  settings.smtcOffsetMs = milliseconds;
+  void logger.info('smtc_offset_changed', { smtcOffsetMs: milliseconds });
+  console.log(`SMTC 额外偏移已设置为：${milliseconds} 毫秒（仅影响 SMTC）`);
+  return true;
+}
+
+async function handleSmtcOffset(rl, settings, command, signal, logger) {
+  if (command.error) {
+    console.log(`${command.error}；允许范围为 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS}。`);
+    return;
+  }
+  if (command.milliseconds !== null) {
+    await setSmtcOffset(settings, command.milliseconds, logger);
+    return;
+  }
+  console.log(`当前 SMTC 额外偏移：${settings.smtcOffsetMs} 毫秒`);
+  console.log(`SMTC 实际使用普通播放偏移 ${settings.lyricOffsetMs} 毫秒，再额外叠加此值。`);
+  while (true) {
+    const raw = (await ask(
+      rl,
+      `输入 SMTC 额外偏移毫秒（${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS}，q 返回）：`,
+      signal
+    )).trim();
+    if (/^q$/i.test(raw)) return;
+    if (/^[+-]?\d+$/.test(raw) && await setSmtcOffset(settings, Number(raw), logger)) return;
+    if (!/^[+-]?\d+$/.test(raw)) console.log('SMTC 额外偏移量必须是整数毫秒。');
+  }
+}
+
 async function handleLogin(rl, api, authState, signal, logger) {
   const key = await api.qrKey({ signal });
   const qr = await api.qrCreate(key, { signal });
@@ -530,6 +570,7 @@ async function songMenu(rl, api, song, context) {
         lyricSource: cachedLyrics.original,
         translatedLyricSource: cachedLyrics.translated,
         lyricOffsetMs: context.settings.lyricOffsetMs,
+        smtcOffsetMs: context.settings.smtcOffsetMs,
         signal,
         logger,
         rl,
@@ -571,54 +612,97 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     console.log('歌单中没有可播放的歌曲。');
     return;
   }
-  let currentIndex = Math.min(Math.max(0, startIndex), tracks.length - 1);
-  let unavailableCount = 0;
-  while (currentIndex >= 0 && currentIndex < tracks.length) {
-    const song = tracks[currentIndex];
-    const result = await api.songUrl(song.id, { signal: context.signal });
-    if (!result?.url) {
-      unavailableCount += 1;
-      console.log(`跳过无法播放的歌曲：${song.name}（${currentIndex + 1}/${tracks.length}）`);
-      currentIndex += 1;
-      continue;
-    }
-
-    let lyrics = { original: '', translated: '' };
-    try {
-      lyrics = await api.lyrics(song.id, { signal: context.signal });
-    } catch (error) {
-      if (isAbortError(error)) throw error;
-      void context.logger.warn('playlist_lyrics_failed', { songId: song.id, error });
-    }
-    const playback = await playWithProgress({
-      song,
-      url: result.url,
-      durationMs: song.durationMs,
-      lyricSource: lyrics.original,
-      translatedLyricSource: lyrics.translated,
-      lyricOffsetMs: context.settings.lyricOffsetMs,
-      playlist: { name: playlist.name, tracks, currentIndex },
-      signal: context.signal,
-      logger: context.logger,
-      rl: context.rl,
-      onOffsetChange: (value) => persistPlaybackOffset(
-        context.settings, value, context.logger, 'playback_hotkey'
-      ),
-      onInterrupt: () => context.shutdown('playback_ctrl_c')
+  const unavailable = new Set();
+  const cache = new Map();
+  const loadTrack = (index) => {
+    if (index < 0 || index >= tracks.length) return Promise.resolve(null);
+    if (cache.has(index)) return cache.get(index);
+    const promise = (async () => {
+      const song = tracks[index];
+      const result = await api.songUrl(song.id, { signal: context.signal });
+      if (!result?.url) {
+        unavailable.add(index);
+        void context.logger.warn('playlist_track_unavailable', { songId: song.id, index, code: result?.code });
+        return null;
+      }
+      unavailable.delete(index);
+      let lyrics = { original: '', translated: '' };
+      try {
+        lyrics = await api.lyrics(song.id, { signal: context.signal });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        void context.logger.warn('playlist_lyrics_failed', { songId: song.id, error });
+      }
+      return {
+        index,
+        song,
+        url: result.url,
+        durationMs: song.durationMs,
+        lyricSource: lyrics.original,
+        translatedLyricSource: lyrics.translated
+      };
+    })().then((payload) => {
+      if (!payload) cache.delete(index);
+      return payload;
+    }, (error) => {
+      cache.delete(index);
+      throw error;
     });
+    cache.set(index, promise);
+    return promise;
+  };
 
-    if (playback === 'quit' || playback === 'stopped' || playback === 'smtc_stop'
-        || playback?.type === 'playlist_quit') return;
-    if (playback?.type === 'playlist_previous') currentIndex = Math.max(0, currentIndex - 1);
-    else if (playback?.type === 'playlist_next') currentIndex += 1;
-    else if (playback?.type === 'playlist_select' && Number.isInteger(playback.index)) {
-      currentIndex = Math.min(Math.max(0, playback.index), tracks.length - 1);
-    } else {
-      currentIndex += 1;
+  const findPlayable = async (firstIndex, step = 1, exact = false) => {
+    for (let index = firstIndex; index >= 0 && index < tracks.length; index += step) {
+      const payload = await loadTrack(index);
+      if (payload) return payload;
+      if (exact) break;
     }
+    return null;
+  };
+
+  const firstIndex = Math.min(Math.max(0, startIndex), tracks.length - 1);
+  const initial = await findPlayable(firstIndex, 1);
+  if (!initial) {
+    console.log('歌单中没有可用的播放链接，可能受会员、版权或地区限制。');
+    return;
   }
-  if (unavailableCount === tracks.length) console.log('歌单中没有可用的播放链接，可能受会员、版权或地区限制。');
-  else console.log('歌单播放完毕。');
+
+  let activeIndex = initial.index;
+  const prefetchAdjacent = (index) => {
+    for (const neighbor of [index - 1, index + 1]) {
+      if (neighbor >= 0 && neighbor < tracks.length) void loadTrack(neighbor).catch(() => {});
+    }
+  };
+  prefetchAdjacent(activeIndex);
+
+  const playback = await playWithProgress({
+    ...initial,
+    lyricOffsetMs: context.settings.lyricOffsetMs,
+    smtcOffsetMs: context.settings.smtcOffsetMs,
+    playlist: { name: playlist.name, tracks, currentIndex: activeIndex },
+    signal: context.signal,
+    logger: context.logger,
+    rl: context.rl,
+    onOffsetChange: (value) => persistPlaybackOffset(
+      context.settings, value, context.logger, 'playback_hotkey'
+    ),
+    onInterrupt: () => context.shutdown('playback_ctrl_c'),
+    onTrackChange: async (targetIndex, cause) => {
+      const step = targetIndex < activeIndex ? -1 : 1;
+      const next = await findPlayable(targetIndex, step, cause === 'select');
+      if (!next) return null;
+      activeIndex = next.index;
+      prefetchAdjacent(activeIndex);
+      return next;
+    }
+  });
+
+  if (playback === 'quit' || playback === 'stopped' || playback === 'smtc_stop'
+      || playback?.type === 'playlist_quit') return;
+  if (unavailable.size === tracks.length) {
+    console.log('歌单中没有可用的播放链接，可能受会员、版权或地区限制。');
+  }
 }
 
 async function playlistMenu(rl, api, id, context) {
@@ -834,6 +918,11 @@ async function resolveInput(rl, api, raw, context) {
     await handleOffset(rl, context.settings, offset, signal, logger);
     return;
   }
+  const smtcOffset = parseSmtcOffsetCommand(raw);
+  if (smtcOffset) {
+    await handleSmtcOffset(rl, context.settings, smtcOffset, signal, logger);
+    return;
+  }
   const quality = parseQualityCommand(raw);
   if (quality) {
     await handleQuality(rl, api, context.settings, quality, signal, logger);
@@ -913,7 +1002,7 @@ export async function main(args = []) {
   process.once('SIGTERM', onSigterm);
 
   try {
-    rl = createInterface({ input, output });
+    rl = createInterface({ input, output, completer: commandCompleter });
     rl.on('SIGINT', onSigint);
     const cookie = await loadCookie();
     const settings = await loadSettings();
@@ -933,6 +1022,7 @@ export async function main(args = []) {
     });
     void logger.info('startup', {
       cookiePresent: Boolean(cookie), quality: settings.quality, lyricOffsetMs: settings.lyricOffsetMs,
+      smtcOffsetMs: settings.smtcOffsetMs,
       baseUrl: api.baseUrl, apiFromEnvironment: apiConfiguration.fromEnvironment
     });
 
@@ -980,6 +1070,7 @@ export async function main(args = []) {
     process.removeListener('SIGTERM', onSigterm);
     rl?.removeListener('SIGINT', onSigint);
     rl?.close();
+    await closeRetainedSmtc();
     await logger.flush();
   }
 }

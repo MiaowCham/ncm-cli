@@ -205,6 +205,7 @@ export async function createSmtcBridge({
       if (message.action === 'seek_absolute') control.positionMs = Math.max(0, Math.round(position));
       else control.deltaMs = Math.round(position);
     }
+    log(logger, 'info', 'smtc_control_received', { action: message.action, requestId });
     try {
       const result = onControl(control);
       if (result && typeof result.catch === 'function') {
