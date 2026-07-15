@@ -6,6 +6,8 @@
 
 要求 Node.js 22+，播放功能还需安装以下任一播放器并加入 `PATH`：`ffplay`、`mpv`、`vlc`。
 
+Windows 下会在 `npm install` 时尝试使用 .NET 8 SDK 构建 SMTC helper；未安装 SDK 时不会阻止安装或普通播放，但 SMTC 不可用。安装 SDK 后可随时执行 `npm run build:smtc`。如需生成不依赖目标机 .NET Runtime 的 helper，可在构建前设置 `NCM_SMTC_SELF_CONTAINED=1`。
+
 Windows Terminal 1.22+ 用户若安装了 `chafa`，封面会优先通过原生 SIXEL 图形显示；Kitty/iTerm2 兼容终端则优先使用各自的原生图形协议。未确认协议支持或编码失败时，程序会安全降级到 `chafa` 字符图和内置 ANSI 24-bit 半块字符，不会盲发图形控制序列；无需另装 `img2sixel`。
 
 ```bash
@@ -96,6 +98,8 @@ Ctrl+C  退出程序
 ```
 
 进度默认每秒刷新一次；如果下一行歌词将在一秒内开始，会在该时间点额外刷新。
+
+Windows 播放时会向 SMTC 发布标题、艺术家、专辑、封面、播放状态和时间线，并接受系统的播放、暂停、停止、快进、后退与进度条跳转控制。当前一次只播放一首歌，因此 SMTC 的上一首/下一首按钮保持禁用。helper 缺失或初始化失败时会自动降级，不影响终端播放控制。
 
 也支持真正的 shell 管道/重定向；此模式只向标准输出写歌词正文：
 

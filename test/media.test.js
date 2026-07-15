@@ -65,6 +65,8 @@ test('播放时钟支持暂停、继续和前后跳转并限制边界', () => {
   assert.equal(clock.position(), 8000);
   assert.equal(clock.seek(5000), 10000);
   assert.equal(clock.seek(-15000), 0);
+  assert.equal(clock.seekTo(7500), 7500);
+  assert.equal(clock.seekTo(20000), 10000);
 });
 
 test('歌词视窗不超过容量并标记已播放与未播放', () => {
