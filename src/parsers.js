@@ -16,6 +16,10 @@ export function parseSignoutCommand(input) {
   return /^\/signout$/i.test(input.trim());
 }
 
+export function parseClearCommand(input) {
+  return /^\/clear$/i.test(input.trim());
+}
+
 export const QUALITY_LEVELS = Object.freeze([
   'standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'dolby', 'jymaster'
 ]);

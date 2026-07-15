@@ -13,7 +13,7 @@ import { loadSettings, saveSettings } from './settings-store.js';
 import {
   normalizeCookie, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
-  parseNumberSelection, parseQualityCommand, parseSignoutCommand, QUALITY_LEVELS
+  parseNumberSelection, parseQualityCommand, parseSignoutCommand, parseClearCommand, QUALITY_LEVELS
 } from './parsers.js';
 
 const QUALITY_LABELS = Object.freeze({
@@ -34,7 +34,7 @@ function printHelp() {
   console.log(`
 ${chalk.bold('命令')}
   关键词                                  搜索歌曲
-  id:347230                               按 ID 点歌（兼容 ID=、id 空格、/id）
+  /id 347230                              按 ID 点歌（兼容 id:、ID=、id 空格等写法）
   /lyrc <id> [plain|lrc|trans|all]        按 ID 直接输出歌词，默认 plain
   /lyric <内容> [plain|lrc|trans|all]     按歌词内容搜索
   /login                                  扫码登录
@@ -43,12 +43,13 @@ ${chalk.bold('命令')}
   /signout                                退出登录并清除本地 Cookie
   /quality                                查看并选择播放音质
   /quality <level>                        直接设置播放音质
+  /clear                                  清空终端并返回搜索
   /help                                   显示帮助
   /quit                                   退出程序
 
 歌词命令、搜索结果和格式选项均支持 ${chalk.cyan('> 文件名.lrc')} 或 ${chalk.cyan('| 文件名.lrc')}。
 音质 level：${QUALITY_LEVELS.join('、')}。
-歌曲详情：p 播放，l 歌词（支持 l > 文件 或 l | 文件），u 播放链接，q 返回。
+歌曲详情：p 播放，l 歌词，u 播放链接，q 返回。
 播放页：q 停止返回，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，t 开关翻译。
 `);
 }
@@ -349,7 +350,7 @@ async function songMenu(rl, api, song, context) {
   await showSong(song, signal);
   let cachedLyrics = null;
   while (true) {
-    const action = (await ask(rl, chalk.yellow('\n[p]播放 [l]歌词（可追加 > 文件 或 | 文件） [u]播放链接 [q]返回 > '), signal)).trim();
+    const action = (await ask(rl, chalk.yellow('\n[p]播放 [l]歌词 [u]播放链接 [q]返回 > '), signal)).trim();
     if (/^(?:q|b|back|返回)$/i.test(action)) return;
     const lyricAction = parseLyricAction(action);
     if (lyricAction) {
@@ -448,6 +449,10 @@ async function lyricSearchFlow(rl, api, command, context) {
 
 async function resolveInput(rl, api, raw, context) {
   const { authState, signal, logger } = context;
+  if (parseClearCommand(raw)) {
+    output.write('\x1b[2J\x1b[H');
+    return;
+  }
   const quality = parseQualityCommand(raw);
   if (quality) {
     await handleQuality(rl, api, quality, signal, logger);

@@ -65,14 +65,6 @@ export function imageProtocolOrder({ nativeGraphics = false, sixel = false, chaf
   return order;
 }
 
-export function sixelPaddingRows(height, output) {
-  const text = Buffer.isBuffer(output) ? output.toString('latin1') : String(output || '');
-  const terminatorIndex = text.lastIndexOf('\x1b\\');
-  const tail = terminatorIndex >= 0 ? text.slice(terminatorIndex + 2) : '';
-  const existingLineMoves = (tail.match(/\r?\n/g) || []).length;
-  return Math.max(0, Math.floor(height) - existingLineMoves);
-}
-
 export function findPlayer() {
   const candidates = ['ffplay', 'mpv', 'vlc', 'cvlc'].map((command) => ({
     command,
@@ -174,8 +166,8 @@ export function lyricViewport(lines, elapsedMs, capacity) {
     if (lines[index].timeMs > elapsedMs) break;
     currentIndex = index;
   }
-  // 当前歌词之前只保留一行，避免历史歌词占用过多屏幕。
-  const start = Math.max(0, currentIndex - (capacity > 1 ? 1 : 0));
+  // 播放页只显示当前歌词和之后的歌词，不再保留历史行。
+  const start = Math.max(0, currentIndex);
   return lines.slice(start, start + capacity).map((line, offset) => ({
     ...line,
     played: start + offset <= currentIndex,
@@ -209,11 +201,7 @@ export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation) {
   const currentIndex = visible.findIndex((line) => line.current);
   if (currentIndex < 0) return visible.flatMap((line) => rowsFor(line)).slice(0, capacity);
 
-  const currentRows = rowsFor(visible[currentIndex]);
-  const output = [];
-  // 极小终端优先保证当前原文及其翻译可见；有余量才保留一行历史原文。
-  if (currentIndex > 0 && capacity > currentRows.length) output.push(...rowsFor(visible[currentIndex - 1], false));
-  output.push(...currentRows);
+  const output = [...rowsFor(visible[currentIndex])];
   for (const line of visible.slice(currentIndex + 1)) output.push(...rowsFor(line));
   return output.slice(0, capacity);
 }
@@ -222,6 +210,12 @@ export function toggleTranslationState(showTranslation, hasTranslation) {
   if (!hasTranslation) return { showTranslation: false, indicator: '暂无翻译' };
   const next = !showTranslation;
   return { showTranslation: next, indicator: `翻译 ${next ? '已开启' : '已关闭'}` };
+}
+
+export function lyricTone(line) {
+  if (line.current) return 'current';
+  if (line.played) return 'played';
+  return 'future';
 }
 
 async function waitForExit(child, timeoutMs = 1500) {
@@ -273,7 +267,7 @@ function setupRawInput(rl, onData) {
   };
 }
 
-function renderDynamic({ elapsedMs, durationMs, paused, lyrics, dynamicRow, showTranslation, indicator }) {
+function renderDynamic({ elapsedMs, durationMs, paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator }) {
   const columns = Math.max(1, process.stdout.columns || 80);
   const rows = Math.max(1, process.stdout.rows || 24);
   const startRow = clamp(dynamicRow, 1, rows);
@@ -293,15 +287,18 @@ function renderDynamic({ elapsedMs, durationMs, paused, lyrics, dynamicRow, show
   const lyricRows = displayRows.length
     ? displayRows.map((line) => {
         const text = truncateText(line.text, columns);
-        if (line.translation) return line.current ? chalk.cyan(text) : line.played ? chalk.white.dim(text) : chalk.gray.dim(text);
-        return line.current ? chalk.whiteBright.bold(text) : line.played ? chalk.white(text) : chalk.gray(text);
+        const tone = lyricTone(line);
+        if (tone === 'future') return chalk.gray(text);
+        if (line.translation) return tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text);
+        return tone === 'current' ? chalk.whiteBright.bold(text) : chalk.white(text);
       })
     : lyricCapacity > 0 ? [chalk.gray(truncateText('暂无逐行歌词', columns))] : [];
   const outputRows = [progress];
   if (availableRows > 1) outputRows.push(indicatorRow);
   if (availableRows > 2) outputRows.push('');
   outputRows.push(...lyricRows);
-  process.stdout.write(`\x1b[${startRow};1H\x1b[0J${outputRows.join('\n')}`);
+  const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
+  process.stdout.write(`${position}\x1b[0J${outputRows.join('\n')}`);
 }
 
 function imageBufferFromDataUri(source) {
@@ -409,8 +406,8 @@ export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
           });
           if (rendered.status === 0 && rendered.stdout?.includes(Buffer.from('\x1bP'))) {
             await writeTerminalOutput(rendered.stdout);
-            const paddingRows = sixelPaddingRows(height, rendered.stdout);
-            if (paddingRows) await writeTerminalOutput('\n'.repeat(paddingRows));
+            // chafa 已在 SIXEL 结束后输出光标移动。Windows Terminal 还会根据
+            // 实际图像像素高度定位光标，额外按请求高度补行会造成双重占位。
             return height;
           }
         } catch {}
@@ -462,6 +459,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
   let refreshTimer = null;
   let smtcTimer = null;
   let dynamicRow = 1;
+  let dynamicAnchored = false;
   let dispatchPlaybackAction = () => {};
   const smtc = await createSmtcBridge({
     song,
@@ -509,7 +507,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     const elapsedMs = clock.position();
     const now = performance.now();
     if (indicator && now >= indicatorUntil) indicator = '';
-    renderDynamic({ elapsedMs, durationMs, paused: clock.paused, lyrics, dynamicRow, showTranslation, indicator });
+    renderDynamic({ elapsedMs, durationMs, paused: clock.paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator });
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
     refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(elapsedMs, lyrics, clock.paused), indicatorDelay));
   };
@@ -629,6 +627,10 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
       const metadataCapacity = Math.max(0, initialRows - coverRows - 1);
       for (const line of metadata.slice(0, metadataCapacity)) console.log(line);
       dynamicRow = Math.min(initialRows, coverRows + Math.min(metadata.length, metadataCapacity) + 1);
+      // 以实际输出结束位置为播放区锚点，避免 SIXEL 的像素高度与请求的
+      // 单元格高度不一致时，绝对行定位清掉元数据或留下大段空白。
+      process.stdout.write('\x1b[s');
+      dynamicAnchored = true;
       restoreInput = setupRawInput(rl, handleData);
       process.stdout.on('resize', resize);
     }
