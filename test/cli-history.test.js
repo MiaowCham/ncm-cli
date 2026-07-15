@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ask } from '../src/cli.js';
+import { ask, playlistPlaybackDestination } from '../src/cli.js';
 
 function fakeReadline(history, answer = '子界面输入', error = null) {
   return {
@@ -30,4 +30,11 @@ test('子界面提问失败时仍恢复历史快照', async () => {
   const rl = fakeReadline(['主页命令'], '未完成输入', failure);
   await assert.rejects(ask(rl, '> '), failure);
   assert.deepEqual(rl.history, ['主页命令']);
+});
+
+test('只有歌单播放器按 q 才要求直接返回主页', () => {
+  assert.equal(playlistPlaybackDestination('quit'), 'home');
+  assert.equal(playlistPlaybackDestination('stopped'), null);
+  assert.equal(playlistPlaybackDestination('smtc_stop'), null);
+  assert.equal(playlistPlaybackDestination('ended'), null);
 });

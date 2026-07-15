@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hasProcessExited } from './process-state.js';
 
 const PROTOCOL_VERSION = 1;
 const DEFAULT_READY_TIMEOUT_MS = 3000;
@@ -94,7 +95,7 @@ function helperSpec(helperCommand) {
 }
 
 function waitForChildExit(child, timeoutMs) {
-  if (child.exitCode !== null) return Promise.resolve();
+  if (hasProcessExited(child)) return Promise.resolve();
   return new Promise((resolve) => {
     const timer = setTimeout(done, timeoutMs);
     function done() {
@@ -328,7 +329,7 @@ export async function createSmtcBridge({
       ready = false;
       try { child.stdin?.end(); } catch {}
       await waitForChildExit(child, closeTimeoutMs);
-      if (child.exitCode === null) {
+      if (!hasProcessExited(child)) {
         try { child.kill(); } catch {}
         await waitForChildExit(child, Math.min(250, closeTimeoutMs));
       }

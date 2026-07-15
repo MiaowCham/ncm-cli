@@ -7,6 +7,7 @@ import stringWidth from 'string-width';
 import supportsTerminalGraphics from 'supports-terminal-graphics';
 import { parseLrc } from './lyrics.js';
 import { createSmtcBridge } from './smtc.js';
+import { hasProcessExited } from './process-state.js';
 
 let cachedWindowsTerminalVersion;
 let retainedSmtcBridge = null;
@@ -407,30 +408,30 @@ export function playbackShortcutText({ playlistOpen = false, hasPlaylist = false
 }
 
 async function waitForExit(child, timeoutMs = 1500) {
-  if (!child || child.exitCode !== null) return;
+  if (hasProcessExited(child)) return;
   await Promise.race([
     once(child, 'exit').catch(() => {}),
     new Promise((resolve) => setTimeout(resolve, timeoutMs))
   ]);
 }
 
-async function terminatePlayer(child) {
-  if (!child || child.exitCode !== null) return;
+export async function terminatePlayer(child) {
+  if (hasProcessExited(child)) return;
   if (process.platform === 'win32' && child.pid) {
     // 大多数播放器可由 TerminateProcess 立即结束；先走快速路径，避免每次按键
     // 都等待额外 taskkill 进程启动。仅在播放器仍未退出时清理进程树。
     try { child.kill(); } catch {}
     await waitForExit(child, 75);
-    if (child.exitCode !== null) return;
+    if (hasProcessExited(child)) return;
     const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     await once(killer, 'exit').catch(() => {});
-    if (child.exitCode === null) child.kill();
+    if (!hasProcessExited(child)) child.kill();
     await waitForExit(child);
     return;
   }
   child.kill('SIGTERM');
   await waitForExit(child, 1000);
-  if (child.exitCode === null) {
+  if (!hasProcessExited(child)) {
     child.kill('SIGKILL');
     await waitForExit(child, 500);
   }
@@ -807,7 +808,7 @@ export async function playWithProgress({
   const stopCurrent = async () => {
     const instance = child;
     child = null;
-    if (!instance || instance.exitCode !== null) return;
+    if (hasProcessExited(instance)) return;
     intentionalStops.add(instance);
     await terminatePlayer(instance);
   };

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { adjustPlaybackOffset, attachLyricTranslations, createLatestDebounce, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, smtcTimeline, supportsSixelEnvironment, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
+import { EventEmitter } from 'node:events';
+import { adjustPlaybackOffset, attachLyricTranslations, createLatestDebounce, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, smtcTimeline, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
 import stringWidth from 'string-width';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
@@ -204,6 +205,26 @@ test('连续播放器控制只应用最后一次待处理重启', async () => {
   debounce.cancel();
   await new Promise((resolve) => setTimeout(resolve, 15));
   assert.deepEqual(values, [30]);
+});
+
+test('播放器收到终止信号后不会继续等待退出超时', async () => {
+  class SignalExitChild extends EventEmitter {
+    exitCode = null;
+    signalCode = null;
+    pid = 12345;
+    killCalls = 0;
+    kill() {
+      this.killCalls += 1;
+      this.signalCode = 'SIGTERM';
+      this.emit('exit', null, 'SIGTERM');
+      return true;
+    }
+  }
+  const child = new SignalExitChild();
+  const startedAt = performance.now();
+  await terminatePlayer(child);
+  assert.equal(child.killCalls, 1);
+  assert.ok(performance.now() - startedAt < 250);
 });
 
 test('切歌等待可被独立信号立即取消', async () => {
