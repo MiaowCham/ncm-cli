@@ -618,6 +618,12 @@ function parsePlaylistExportAction(raw) {
   return { output: match[1]?.trim() || null };
 }
 
+const PLAYLIST_RETURN_HOME = 'home';
+
+export function playlistPlaybackDestination(playback) {
+  return playback === 'quit' ? PLAYLIST_RETURN_HOME : null;
+}
+
 async function playPlaylist(api, playlist, tracks, startIndex, context) {
   if (!tracks.length) {
     console.log('歌单中没有可播放的歌曲。');
@@ -712,8 +718,9 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     }
   });
 
-  if (playback === 'quit' || playback === 'stopped' || playback === 'smtc_stop'
-      || playback?.type === 'playlist_quit') return;
+  const destination = playlistPlaybackDestination(playback);
+  if (destination) return destination;
+  if (playback === 'stopped' || playback === 'smtc_stop' || playback?.type === 'playlist_quit') return;
   if (unavailable.size === tracks.length) {
     console.log('歌单中没有可用的播放链接，可能受会员、版权或地区限制。');
   }
@@ -746,10 +753,10 @@ async function playlistMenu(rl, api, id, context) {
   while (true) {
     const raw = (await ask(
       rl,
-      chalk.yellow('\n[p]播放 [e]导出列表 [u]歌单链接 [q]返回 > '),
+      chalk.yellow('\n[p]播放 [e]导出列表 [u]歌单链接 [q]主页 > '),
       context.signal
     )).trim();
-    if (/^(?:q|b|back|返回)$/i.test(raw)) return;
+    if (/^(?:q|b|back|返回)$/i.test(raw)) return PLAYLIST_RETURN_HOME;
     if (/^(?:u|url|链接)$/i.test(raw)) {
       console.log(`歌单链接：${playlistLink(playlist.id || id)}`);
       console.log(cover ? `封面链接：${cover}` : '无封面链接');
@@ -757,7 +764,8 @@ async function playlistMenu(rl, api, id, context) {
     }
     if (/^(?:p|play|播放)$/i.test(raw)) {
       const tracks = await loadFullTracks();
-      await playPlaylist(api, playlist, tracks, 0, { ...context, rl });
+      const destination = await playPlaylist(api, playlist, tracks, 0, { ...context, rl });
+      if (destination === PLAYLIST_RETURN_HOME) return destination;
       continue;
     }
     const exportAction = parsePlaylistExportAction(raw);
@@ -829,6 +837,7 @@ async function listUserPlaylists(rl, api, context) {
         items: playlists,
         initialIndex: selectedIndex,
         title: '我的歌单',
+        hint: '↑/↓ 或滚轮选择  Enter 查看  q/Esc 返回主页',
         itemText: (playlist, index) => `${String(index + 1).padStart(2)}. ${playlist.name} [${playlist.id}] ${playlist.trackCount ?? 0} 首`,
         signal: context.signal,
         onInterrupt: () => context.shutdown('playlist_list_ctrl_c'),
@@ -837,14 +846,14 @@ async function listUserPlaylists(rl, api, context) {
       });
       if (selection === null) return;
       selectedIndex = selection;
-      await playlistMenu(rl, api, playlists[selectedIndex].id, context);
+      if (await playlistMenu(rl, api, playlists[selectedIndex].id, context) === PLAYLIST_RETURN_HOME) return;
       continue;
     }
     console.log(chalk.bold('\n我的歌单'));
     playlists.forEach((playlist, index) => {
       console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${playlist.name} ${chalk.gray(`[${playlist.id}] ${playlist.trackCount ?? 0} 首`)}`);
     });
-    const raw = (await ask(rl, '选择序号预览歌单，q 返回搜索：', context.signal)).trim();
+    const raw = (await ask(rl, '选择序号预览歌单，q 返回主页：', context.signal)).trim();
     if (/^q$/i.test(raw)) return;
     const selection = parseNumberSelection(raw);
     if (!selection || selection.quit || selection.output || !playlists[selection.index]) {
@@ -852,7 +861,7 @@ async function listUserPlaylists(rl, api, context) {
       continue;
     }
     selectedIndex = selection.index;
-    await playlistMenu(rl, api, playlists[selection.index].id, context);
+    if (await playlistMenu(rl, api, playlists[selection.index].id, context) === PLAYLIST_RETURN_HOME) return;
   }
 }
 
