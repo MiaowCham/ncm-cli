@@ -84,17 +84,39 @@ export function playerArguments(command, url, seconds, volume = 100) {
   throw new Error(`不支持的播放器：${command}`);
 }
 
-export function playbackAction(buffer) {
+export function playbackAction(buffer, { playlistOpen = false, playlistSelection = 0 } = {}) {
   const key = Buffer.isBuffer(buffer) ? buffer.toString('utf8') : String(buffer);
   if (key.includes('\u0003')) return { type: 'interrupt' };
   if (key.toLowerCase() === 'q') return { type: 'quit' };
+  if (key.includes('\u001b[1;5D') || key.includes('\u001b[5D')) return { type: 'playlist_previous' };
+  if (key.includes('\u001b[1;5C') || key.includes('\u001b[5C')) return { type: 'playlist_next' };
+  const sgrMouse = key.match(/\u001b\[<(\d+);\d+;\d+([Mm])/);
+  if (sgrMouse) {
+    const button = Number(sgrMouse[1]);
+    if (sgrMouse[2] === 'M' && (button & 64) === 64 && (button & 128) === 0) {
+      if (!playlistOpen) return { type: 'ignore' };
+      return { type: 'playlist_move', delta: (button & 1) === 0 ? -1 : 1 };
+    }
+    return { type: 'ignore' };
+  }
+  if (key.toLowerCase() === 'p') return { type: 'toggle_playlist' };
+  if (playlistOpen && key === '\u001b') return { type: 'close_playlist' };
+  if (playlistOpen && (key === '\r' || key === '\n')) return { type: 'playlist_select', index: playlistSelection };
   if (key === ' ') return { type: 'toggle_pause' };
   if (key.includes('\u001b[D')) return { type: 'seek', deltaMs: -5000 };
   if (key.includes('\u001b[C')) return { type: 'seek', deltaMs: 5000 };
+  if (playlistOpen && key.includes('\u001b[A')) return { type: 'playlist_move', delta: -1 };
+  if (playlistOpen && key.includes('\u001b[B')) return { type: 'playlist_move', delta: 1 };
   if (key.includes('\u001b[A')) return { type: 'volume', delta: 5 };
   if (key.includes('\u001b[B')) return { type: 'volume', delta: -5 };
   if (key.toLowerCase() === 't') return { type: 'toggle_translation' };
   return { type: 'ignore' };
+}
+
+export function playbackTerminalModeSequence(entering) {
+  return entering
+    ? '\u001b[?1007l\u001b[?1000h\u001b[?1006h'
+    : '\u001b[?1000l\u001b[?1006l\u001b[?1007h';
 }
 
 function formatTime(ms) {
@@ -141,10 +163,25 @@ export function createPlaybackClock(durationMs, now = () => performance.now()) {
   };
 }
 
+export function displayPosition(rawMs, offsetMs = 0) {
+  const raw = Number(rawMs);
+  const offset = Number(offsetMs);
+  return (Number.isFinite(raw) ? raw : 0) - (Number.isFinite(offset) ? offset : 0);
+}
+
+export function rawPosition(displayMs, offsetMs = 0, durationMs = Infinity) {
+  const display = Number(displayMs);
+  const offset = Number(offsetMs);
+  const duration = Number(durationMs);
+  const maximum = Number.isFinite(duration) ? Math.max(0, duration) : Infinity;
+  const safeDisplay = Number.isFinite(display) ? display : 0;
+  if (safeDisplay <= 0) return 0;
+  return clamp(safeDisplay + (Number.isFinite(offset) ? offset : 0), 0, maximum);
+}
+
 export function lyricPosition(elapsedMs, lyricOffsetMs = 2000) {
-  const elapsed = Number(elapsedMs);
   const offset = Number(lyricOffsetMs);
-  return (Number.isFinite(elapsed) ? elapsed : 0) - (Number.isFinite(offset) ? offset : 2000);
+  return displayPosition(elapsedMs, Number.isFinite(offset) ? offset : 2000);
 }
 
 export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOffsetMs = 0) {
@@ -225,6 +262,35 @@ export function lyricTone(line) {
   return 'future';
 }
 
+export function playlistViewport(tracks, selectedIndex, currentIndex, capacity) {
+  const items = Array.isArray(tracks) ? tracks : [];
+  const count = items.length;
+  const safeCapacity = Math.max(0, Math.floor(Number(capacity) || 0));
+  if (!count || !safeCapacity) return { start: 0, selectedIndex: -1, rows: [] };
+  const selected = clamp(Math.floor(Number(selectedIndex) || 0), 0, count - 1);
+  const current = clamp(Math.floor(Number(currentIndex) || 0), 0, count - 1);
+  const maximumStart = Math.max(0, count - safeCapacity);
+  const start = clamp(selected - Math.floor(safeCapacity / 2), 0, maximumStart);
+  return {
+    start,
+    selectedIndex: selected,
+    rows: items.slice(start, start + safeCapacity).map((track, offset) => ({
+      track,
+      index: start + offset,
+      selected: start + offset === selected,
+      current: start + offset === current
+    }))
+  };
+}
+
+export function playbackShortcutText({ playlistOpen = false, hasPlaylist = false } = {}) {
+  if (playlistOpen && hasPlaylist) {
+    return 'p/Esc 关闭歌单  ↑/↓ 选择  Enter 播放  Ctrl+←/→ 上/下一首';
+  }
+  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  t 翻译';
+  return hasPlaylist ? `${base}  p 歌单  Ctrl+←/→ 切歌` : base;
+}
+
 async function waitForExit(child, timeoutMs = 1500) {
   if (!child || child.exitCode !== null) return;
   await Promise.race([
@@ -255,12 +321,25 @@ function setupRawInput(rl, onData) {
   if (!process.stdin.isTTY || typeof stream.setRawMode !== 'function') return () => {};
   const wasRaw = Boolean(stream.isRaw);
   const wasPaused = stream.isPaused();
-  rl?.pause();
   const previousDataListeners = stream.listeners('data');
-  for (const listener of previousDataListeners) stream.removeListener('data', listener);
-  stream.on('data', onData);
-  stream.setRawMode(true);
-  stream.resume();
+  let attached = false;
+  try {
+    rl?.pause();
+    for (const listener of previousDataListeners) stream.removeListener('data', listener);
+    stream.on('data', onData);
+    attached = true;
+    stream.setRawMode(true);
+    stream.resume();
+  } catch (error) {
+    if (attached) stream.removeListener('data', onData);
+    for (const listener of previousDataListeners) stream.on('data', listener);
+    try { stream.setRawMode(wasRaw); } catch {}
+    if (!wasPaused) {
+      try { stream.resume(); } catch {}
+      try { rl?.resume(); } catch {}
+    }
+    throw error;
+  }
   return () => {
     stream.pause();
     stream.removeListener('data', onData);
@@ -274,7 +353,26 @@ function setupRawInput(rl, onData) {
   };
 }
 
-function renderDynamic({ elapsedMs, lyricElapsedMs, durationMs, paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator }) {
+function playlistTrackText(track, index) {
+  const title = track?.name ?? track?.title ?? `歌曲 ${index + 1}`;
+  const artists = Array.isArray(track?.artists) ? track.artists.join('/') : track?.artist;
+  return `${index + 1}. ${title}${artists ? ` - ${artists}` : ''}`;
+}
+
+function renderDynamic({
+  elapsedMs,
+  lyricElapsedMs,
+  durationMs,
+  paused,
+  lyrics,
+  dynamicRow,
+  dynamicAnchored,
+  showTranslation,
+  indicator,
+  playlist,
+  playlistOpen,
+  playlistSelection
+}) {
   const columns = Math.max(1, process.stdout.columns || 80);
   const rows = Math.max(1, process.stdout.rows || 24);
   const startRow = clamp(dynamicRow, 1, rows);
@@ -286,24 +384,40 @@ function renderDynamic({ elapsedMs, lyricElapsedMs, durationMs, paused, lyrics, 
   const bar = `${'='.repeat(filled)}${filled < barWidth ? '>' : ''}${' '.repeat(Math.max(0, barWidth - filled - 1))}`;
   const progressText = truncateText(`[${bar}] ${timeText}${paused ? '  [已暂停]' : ''}`, columns);
   const progress = paused ? chalk.yellow(progressText) : progressText;
-  const shortcuts = chalk.cyan(truncateText('q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  t 翻译', columns));
+  const shortcutText = playbackShortcutText({ playlistOpen, hasPlaylist: Boolean(playlist?.tracks?.length) });
+  const shortcuts = chalk.cyan(truncateText(shortcutText, columns));
   const indicatorRow = indicator ? chalk.yellow(truncateText(indicator, columns)) : shortcuts;
   // 进度、快捷键指示栏和其后空行固定占三行。
   const lyricCapacity = Math.max(0, availableRows - 3);
-  const displayRows = playbackLyricRows(lyrics, lyricElapsedMs, lyricCapacity, showTranslation);
-  const lyricRows = displayRows.length
-    ? displayRows.map((line) => {
-        const text = truncateText(line.text, columns);
-        const tone = lyricTone(line);
-        if (tone === 'future') return chalk.gray(text);
-        if (line.translation) return tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text);
-        return tone === 'current' ? chalk.whiteBright.bold(text) : chalk.white(text);
-      })
-    : lyricCapacity > 0 ? [chalk.gray(truncateText('暂无逐行歌词', columns))] : [];
+  let contentRows;
+  if (playlistOpen) {
+    const title = truncateText(`歌单：${playlist?.name || '当前播放队列'}`, columns);
+    const viewport = playlistViewport(playlist?.tracks, playlistSelection, playlist?.currentIndex, Math.max(0, lyricCapacity - 1));
+    const trackRows = viewport.rows.map((item) => {
+      const prefix = `${item.current ? '▶' : ' '} ${item.selected ? '›' : ' '} `;
+      const text = truncateText(`${prefix}${playlistTrackText(item.track, item.index)}`, columns);
+      if (item.selected) return chalk.bgWhite.black(text);
+      return item.current ? chalk.whiteBright.bold(text) : chalk.gray(text);
+    });
+    contentRows = lyricCapacity > 0
+      ? [chalk.cyan.bold(title), ...(trackRows.length ? trackRows : [chalk.gray('歌单为空')])].slice(0, lyricCapacity)
+      : [];
+  } else {
+    const displayRows = playbackLyricRows(lyrics, lyricElapsedMs, lyricCapacity, showTranslation);
+    contentRows = displayRows.length
+      ? displayRows.map((line) => {
+          const text = truncateText(line.text, columns);
+          const tone = lyricTone(line);
+          if (tone === 'future') return chalk.gray(text);
+          if (line.translation) return tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text);
+          return tone === 'current' ? chalk.whiteBright.bold(text) : chalk.white(text);
+        })
+      : lyricCapacity > 0 ? [chalk.gray(truncateText('暂无逐行歌词', columns))] : [];
+  }
   const outputRows = [progress];
   if (availableRows > 1) outputRows.push(indicatorRow);
   if (availableRows > 2) outputRows.push('');
-  outputRows.push(...lyricRows);
+  outputRows.push(...contentRows);
   const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
   process.stdout.write(`${position}\x1b[0J${outputRows.join('\n')}`);
 }
@@ -450,7 +564,19 @@ export async function tryRenderImage(source, { signal, size = 'detail' } = {}) {
   }
 }
 
-export async function playWithProgress({ song, url, durationMs, lyricSource = '', translatedLyricSource = '', lyricOffsetMs = 2000, signal, logger, rl, onInterrupt }) {
+export async function playWithProgress({
+  song,
+  url,
+  durationMs,
+  lyricSource = '',
+  translatedLyricSource = '',
+  lyricOffsetMs = 2000,
+  playlist = { name: '', tracks: [], currentIndex: 0 },
+  signal,
+  logger,
+  rl,
+  onInterrupt
+}) {
   const player = findPlayer();
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
@@ -461,6 +587,13 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
   let showTranslation = hasTranslation;
   let indicator = '';
   let indicatorUntil = 0;
+  const playlistTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+  const playlistCurrentIndex = playlistTracks.length
+    ? clamp(Math.floor(Number(playlist?.currentIndex) || 0), 0, playlistTracks.length - 1)
+    : -1;
+  const playbackPlaylist = { name: playlist?.name || '', tracks: playlistTracks, currentIndex: playlistCurrentIndex };
+  let playlistOpen = false;
+  let playlistSelection = playlistCurrentIndex >= 0 ? playlistCurrentIndex : 0;
   let child = null;
   let finished = false;
   let refreshTimer = null;
@@ -470,7 +603,10 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
   let dispatchPlaybackAction = () => {};
   const smtc = await createSmtcBridge({
     song,
-    durationMs,
+    durationMs: Math.max(0, displayPosition(durationMs, lyricOffsetMs)),
+    playlistControls: playlistTracks.length > 0,
+    canPrevious: playlistCurrentIndex > 0,
+    canNext: playlistCurrentIndex >= 0 && playlistCurrentIndex < playlistTracks.length - 1,
     logger,
     onControl: (action) => dispatchPlaybackAction(action)
   });
@@ -482,10 +618,16 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     rejectCompletion = reject;
   });
 
+  const updateSmtc = (status, rawPositionMs = clock.position()) => smtc.updatePlayback({
+    status,
+    positionMs: Math.max(0, displayPosition(rawPositionMs, lyricOffsetMs)),
+    durationMs: Math.max(0, displayPosition(durationMs, lyricOffsetMs))
+  });
+
   const spawnAt = (positionMs) => {
     const instance = spawn(player.command, player.args(url, positionMs / 1000, volume), { stdio: 'ignore', windowsHide: true });
     child = instance;
-    smtc.updatePlayback({ status: 'playing', positionMs, durationMs });
+    updateSmtc('playing', positionMs);
     void logger?.info('player_spawn', { player: player.command, pid: instance.pid, positionMs });
     instance.once('error', (error) => {
       if (!finished && !intentionalStops.has(instance)) rejectCompletion(error);
@@ -494,7 +636,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
       void logger?.info('player_exit', { player: player.command, code, signal: exitSignal });
       if (!finished && child === instance && !intentionalStops.has(instance)) {
         finished = true;
-        smtc.updatePlayback({ status: 'stopped', positionMs: clock.position(), durationMs });
+        updateSmtc('stopped');
         resolveCompletion('ended');
       }
     });
@@ -511,13 +653,28 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
   const render = () => {
     if (!tty || finished) return;
     if (refreshTimer) clearTimeout(refreshTimer);
-    const elapsedMs = clock.position();
-    const lyricElapsedMs = lyricPosition(elapsedMs, lyricOffsetMs);
+    const rawElapsedMs = clock.position();
+    const elapsedMs = displayPosition(rawElapsedMs, lyricOffsetMs);
+    const displayDurationMs = Math.max(0, displayPosition(durationMs, lyricOffsetMs));
+    const lyricElapsedMs = elapsedMs;
     const now = performance.now();
     if (indicator && now >= indicatorUntil) indicator = '';
-    renderDynamic({ elapsedMs, lyricElapsedMs, durationMs, paused: clock.paused, lyrics, dynamicRow, dynamicAnchored, showTranslation, indicator });
+    renderDynamic({
+      elapsedMs,
+      lyricElapsedMs,
+      durationMs: displayDurationMs,
+      paused: clock.paused,
+      lyrics,
+      dynamicRow,
+      dynamicAnchored,
+      showTranslation,
+      indicator,
+      playlist: playbackPlaylist,
+      playlistOpen,
+      playlistSelection
+    });
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
-    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(elapsedMs, lyrics, clock.paused, lyricOffsetMs), indicatorDelay));
+    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, clock.paused, lyricOffsetMs), indicatorDelay));
   };
 
   const setIndicator = (text) => {
@@ -540,7 +697,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     finished = true;
     if (refreshTimer) clearTimeout(refreshTimer);
     await stopCurrent();
-    smtc.updatePlayback({ status: 'stopped', positionMs: clock.position(), durationMs });
+    updateSmtc('stopped');
     resolveCompletion(reason);
   });
 
@@ -551,6 +708,42 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     }
     if (action.type === 'quit' || action.action === 'stop') {
       finish(action.action === 'stop' ? 'smtc_stop' : 'quit');
+      return;
+    }
+    if (action.type === 'playlist_previous' || action.type === 'playlist_next'
+        || action.action === 'previous' || action.action === 'next') {
+      if (playlistTracks.length) {
+        const type = action.action === 'previous' ? 'playlist_previous'
+          : action.action === 'next' ? 'playlist_next' : action.type;
+        finish({ type });
+      }
+      return;
+    }
+    if (action.type === 'toggle_playlist') {
+      if (playlistTracks.length) {
+        playlistOpen = !playlistOpen;
+        render();
+      }
+      return;
+    }
+    if (action.type === 'close_playlist') {
+      if (playlistTracks.length) {
+        playlistOpen = false;
+        render();
+      }
+      return;
+    }
+    if (action.type === 'playlist_move') {
+      if (playlistOpen && playlistTracks.length) {
+        playlistSelection = clamp(playlistSelection + action.delta, 0, playlistTracks.length - 1);
+        render();
+      }
+      return;
+    }
+    if (action.type === 'playlist_select') {
+      if (playlistOpen && Number.isInteger(action.index) && action.index >= 0 && action.index < playlistTracks.length) {
+        finish({ type: 'playlist_select', index: action.index });
+      }
       return;
     }
     if (action.type === 'toggle_pause' || action.action === 'play' || action.action === 'pause') {
@@ -564,23 +757,25 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
         } else if (shouldPause && !clock.paused) {
           clock.pause();
           await stopCurrent();
-          smtc.updatePlayback({ status: 'paused', positionMs: clock.position(), durationMs });
+          updateSmtc('paused');
           setIndicator('已暂停');
         }
       });
       return;
     }
-    if (action.type === 'seek' || action.action === 'fast_forward' || action.action === 'rewind' || action.action === 'seek_absolute') {
+    if (action.type === 'seek' || action.action === 'fast_forward' || action.action === 'rewind' || action.action === 'seek_absolute' || action.action === 'seek_relative') {
       enqueue(async () => {
         const deltaMs = action.action === 'fast_forward' ? 5000 : action.action === 'rewind' ? -5000 : action.deltaMs;
-        const seekTo = action.action === 'seek_absolute' ? clock.seekTo(action.positionMs) : clock.seek(deltaMs);
-        if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(seekTo)}`);
+        const seekTo = action.action === 'seek_absolute'
+          ? clock.seekTo(rawPosition(action.positionMs, lyricOffsetMs, durationMs))
+          : clock.seek(deltaMs);
+        if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, lyricOffsetMs))}`);
         else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
         if (!clock.paused) {
           await stopCurrent();
           spawnAt(seekTo);
         } else {
-          smtc.updatePlayback({ status: 'paused', positionMs: seekTo, durationMs });
+          updateSmtc('paused', seekTo);
         }
       });
       return;
@@ -606,7 +801,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     }
   };
 
-  const handleData = (buffer) => dispatchPlaybackAction(playbackAction(buffer));
+  const handleData = (buffer) => dispatchPlaybackAction(playbackAction(buffer, { playlistOpen, playlistSelection }));
 
   const abort = () => enqueue(async () => {
     if (finished) return;
@@ -620,7 +815,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
   const resize = () => render();
   try {
     if (tty) {
-      process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
+      process.stdout.write(`\x1b[?1049h${playbackTerminalModeSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
       const initialRows = Math.max(1, process.stdout.rows || 24);
       const initialColumns = Math.max(1, process.stdout.columns || 80);
       const coverRows = initialRows >= 10
@@ -648,11 +843,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
       spawnAt(clock.position());
       smtcTimer = setInterval(() => {
         if (!finished) {
-          smtc.updatePlayback({
-            status: clock.paused ? 'paused' : 'playing',
-            positionMs: clock.position(),
-            durationMs
-          });
+          updateSmtc(clock.paused ? 'paused' : 'playing');
         }
       }, 1000);
       render();
@@ -664,10 +855,15 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     if (smtcTimer) clearInterval(smtcTimer);
     signal?.removeEventListener('abort', abort);
     process.stdout.removeListener('resize', resize);
-    await stopCurrent();
-    smtc.updatePlayback({ status: 'stopped', positionMs: clock.position(), durationMs });
-    await smtc.close();
-    restoreInput();
-    if (tty) process.stdout.write('\x1b[?25h\x1b[?1049l');
+    try {
+      await stopCurrent();
+      updateSmtc('stopped');
+      await smtc.close();
+    } finally {
+      try { restoreInput(); } catch {}
+      if (tty) {
+        try { process.stdout.write(`${playbackTerminalModeSequence(false)}\x1b[?25h\x1b[?1049l`); } catch {}
+      }
+    }
   }
 }

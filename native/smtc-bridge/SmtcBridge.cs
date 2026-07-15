@@ -39,13 +39,31 @@ internal sealed class SmtcBridge : IDisposable
         _smtc.IsPlayEnabled = Enabled("play");
         _smtc.IsPauseEnabled = Enabled("pause");
         _smtc.IsStopEnabled = Enabled("stop");
-        _smtc.IsNextEnabled = false;
-        _smtc.IsPreviousEnabled = false;
+        _smtc.IsNextEnabled = Enabled("next", false);
+        _smtc.IsPreviousEnabled = Enabled("previous", false);
         _smtc.IsFastForwardEnabled = Enabled("fastForward");
         _smtc.IsRewindEnabled = Enabled("rewind");
         _smtc.DisplayUpdater.Type = MediaPlaybackType.Music;
         _smtc.ButtonPressed += OnButtonPressed;
         _smtc.PlaybackPositionChangeRequested += OnPlaybackPositionChangeRequested;
+    }
+
+    public void UpdateControls(JsonElement command)
+    {
+        var smtc = RequireInitialized();
+        var controls = command.TryGetProperty("controls", out var nested) && nested.ValueKind == JsonValueKind.Object
+            ? nested
+            : command;
+        if (controls.TryGetProperty("previous", out var previous) &&
+            (previous.ValueKind == JsonValueKind.True || previous.ValueKind == JsonValueKind.False))
+        {
+            smtc.IsPreviousEnabled = previous.GetBoolean();
+        }
+        if (controls.TryGetProperty("next", out var next) &&
+            (next.ValueKind == JsonValueKind.True || next.ValueKind == JsonValueKind.False))
+        {
+            smtc.IsNextEnabled = next.GetBoolean();
+        }
     }
 
     public async Task UpdateMetadataAsync(JsonElement command)
