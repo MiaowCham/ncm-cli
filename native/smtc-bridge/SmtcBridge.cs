@@ -13,6 +13,8 @@ internal sealed class SmtcBridge : IDisposable
     private bool _seekEnabled = true;
     private bool _disposed;
 
+    internal event Action<string>? ControlReceived;
+
     public void Initialize(JsonElement command)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -141,6 +143,7 @@ internal sealed class SmtcBridge : IDisposable
         var action = Protocol.MapButton(args.Button);
         if (action is not null)
         {
+            ControlReceived?.Invoke(action);
             Protocol.Write(new { type = "control", requestId = Protocol.NextRequestId(), action });
         }
     }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { adjustPlaybackOffset, attachLyricTranslations, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
+import { adjustPlaybackOffset, attachLyricTranslations, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, smtcTimeline, supportsSixelEnvironment, toggleTranslationState, wrapTerminalText } from '../src/media.js';
+import stringWidth from 'string-width';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
   assert.equal(supportsSixelEnvironment({ env: { WT_SESSION: 'session' }, platform: 'win32', windowsTerminalVersion: '1.21.9999.0' }), false);
@@ -130,6 +131,25 @@ test('只有存在播放队列时快捷提示才显示歌单操作', () => {
   assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Ctrl\+↑\/↓ 偏移/);
 });
 
+test('窄窗口中的快捷键提示按显示宽度换行而不是省略', () => {
+  const source = playbackShortcutText({ hasPlaylist: true });
+  const rows = playbackShortcutRows({ hasPlaylist: true }, 24);
+  assert.ok(rows.length > 1);
+  assert.ok(rows.every((row) => stringWidth(row) <= 24));
+  assert.equal(rows.join('').replaceAll(' ', ''), source.replaceAll(' ', ''));
+  assert.deepEqual(wrapTerminalText('中文abc', 4), ['中文', 'abc']);
+});
+
+test('SMTC offset 只修正位置且不缩短歌曲物理时长', () => {
+  assert.deepEqual(smtcTimeline(5000, 240000, 2000), { positionMs: 3000, durationMs: 240000 });
+  // 普通 offset 与仅供 SMTC 校准的 offset 在调用处叠加。
+  assert.deepEqual(smtcTimeline(5000, 240000, 2000 + 350), { positionMs: 2650, durationMs: 240000 });
+  assert.equal(rawPosition(2650, 2000 + 350, 240000), 5000);
+  assert.deepEqual(smtcTimeline(1000, 240000, 2000), { positionMs: 0, durationMs: 240000 });
+  assert.deepEqual(smtcTimeline(240000, 240000, 2000), { positionMs: 240000, durationMs: 240000 });
+  assert.deepEqual(smtcTimeline(250000, 240000, -2000), { positionMs: 240000, durationMs: 240000 });
+});
+
 test('播放时间偏移每次调整 50ms 并限制在正负 60000ms', () => {
   assert.equal(adjustPlaybackOffset(2000, 50), 2050);
   assert.equal(adjustPlaybackOffset(2000, -50), 1950);
@@ -156,6 +176,18 @@ test('播放时钟支持暂停、继续和前后跳转并限制边界', () => {
   assert.equal(clock.seek(-15000), 0);
   assert.equal(clock.seekTo(7500), 7500);
   assert.equal(clock.seekTo(20000), 10000);
+});
+
+test('播放器重启等待期间可冻结播放时钟避免吞掉音频片段', () => {
+  let now = 0;
+  const clock = createPlaybackClock(10000, () => now);
+  now = 1200;
+  clock.pause();
+  now = 3200;
+  assert.equal(clock.position(), 1200);
+  clock.resume();
+  now = 3700;
+  assert.equal(clock.position(), 1700);
 });
 
 test('歌词视窗只显示当前行和未来行且不超过容量', () => {

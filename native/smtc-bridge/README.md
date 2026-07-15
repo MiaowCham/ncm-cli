@@ -34,4 +34,5 @@ dotnet run --project .\NcmCli.SmtcBridge.csproj -- --integration-test
 
 The integration test registers a uniquely named SMTC session, then queries it
 through `GlobalSystemMediaTransportControlsSessionManager` and verifies the
-round-trip metadata, playback state, position, and duration.
+round-trip metadata, playback state, position, duration, and real Windows
+previous/next requests (`TrySkipPreviousAsync` / `TrySkipNextAsync`).
