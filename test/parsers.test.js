@@ -47,13 +47,15 @@ test('识别歌词输出语法', () => {
 });
 
 test('识别歌词 ID 直出命令', () => {
-  assert.deepEqual(parseLyricDirectCommand('/lyrc 347230'), { id: '347230', format: 'plain', output: null });
-  assert.deepEqual(parseLyricDirectCommand('/lyrc 347230 all > output.lrc'), { id: '347230', format: 'all', output: 'output.lrc' });
-  assert.equal(parseLyricDirectCommand('/lyrc abc'), null);
+  assert.deepEqual(parseLyricDirectCommand('/idlyric 347230'), { id: '347230', format: 'plain', output: null });
+  assert.deepEqual(parseLyricDirectCommand('/idlyric 347230 all > output.lrc'), { id: '347230', format: 'all', output: 'output.lrc' });
+  assert.equal(parseLyricDirectCommand('/idlyric abc'), null);
+  assert.equal(parseLyricDirectCommand('/lyrc 347230'), null);
 });
 
 test('识别歌词搜索及尾部格式', () => {
   assert.deepEqual(parseLyricSearchCommand('/lyric 风雨里追赶'), { query: '风雨里追赶', format: null, output: null });
+  assert.deepEqual(parseLyricSearchCommand('/lyric 347230'), { query: '347230', format: null, output: null });
   assert.deepEqual(parseLyricSearchCommand('/lyric 风雨里追赶 trans > out.lrc'), { query: '风雨里追赶', format: 'trans', output: 'out.lrc' });
   assert.deepEqual(parseLyricSearchCommand('/lyrics all'), { query: 'all', format: null, output: null });
 });

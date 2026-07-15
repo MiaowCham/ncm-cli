@@ -35,7 +35,7 @@ function printHelp() {
 ${chalk.bold('命令')}
   关键词                                  搜索歌曲
   /id <id>                                按 ID 点歌（兼容 id:、ID=、id 空格等写法）
-  /lyrc <id> [plain|lrc|trans|all]        按 ID 直接输出歌词，默认 plain
+  /idlyric <id> [plain|lrc|trans|all]     按歌曲 ID 直接输出歌词，默认 plain
   /lyric <内容> [plain|lrc|trans|all]     按歌词内容搜索
   /login                                  扫码登录
   /login <cookie>                         保存并使用已有 Cookie
@@ -527,7 +527,7 @@ export async function main(args = []) {
     const api = new NcmApi({ cookie, logger, quality: settings.quality });
     void logger.info('startup', { cookiePresent: Boolean(cookie), quality: settings.quality });
 
-    if (/^(?:lyrc|lyric|lyrics)$/i.test(args[0] || '') && /^\d+$/.test(args[1] || '')) {
+    if (/^idlyric$/i.test(args[0] || '') && /^\d+$/.test(args[1] || '')) {
       const lyrics = await api.lyrics(args[1], { signal: controller.signal });
       process.stdout.write(`${plainLyrics(lyrics.original)}\n`);
       return;
