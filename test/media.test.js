@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attachLyricTranslations, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
+import { adjustPlaybackOffset, attachLyricTranslations, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
   assert.equal(supportsSixelEnvironment({ env: { WT_SESSION: 'session' }, platform: 'win32', windowsTerminalVersion: '1.21.9999.0' }), false);
@@ -79,6 +79,10 @@ test('播放快捷键解析退出、暂停、跳转、音量、翻译与 Ctrl+C'
   assert.deepEqual(playbackAction('\u001b[5D'), { type: 'playlist_previous' });
   assert.deepEqual(playbackAction('\u001b[1;5C'), { type: 'playlist_next' });
   assert.deepEqual(playbackAction('\u001b[5C'), { type: 'playlist_next' });
+  assert.deepEqual(playbackAction('\u001b[1;5A'), { type: 'offset', deltaMs: 50 });
+  assert.deepEqual(playbackAction('\u001b[5A'), { type: 'offset', deltaMs: 50 });
+  assert.deepEqual(playbackAction('\u001b[1;5B'), { type: 'offset', deltaMs: -50 });
+  assert.deepEqual(playbackAction('\u001b[5B'), { type: 'offset', deltaMs: -50 });
   assert.deepEqual(playbackAction(`prefix\u001b[1;5Dsuffix`), { type: 'playlist_previous' });
   assert.deepEqual(playbackAction(`\u001b[D\u001b[1;5C`), { type: 'playlist_next' });
   assert.deepEqual(playbackAction('quit'), { type: 'ignore' });
@@ -90,6 +94,8 @@ test('歌单覆盖层接管上下键、Enter 和 Esc', () => {
   const options = { playlistOpen: true, playlistSelection: 3 };
   assert.deepEqual(playbackAction('\u001b[A', options), { type: 'playlist_move', delta: -1 });
   assert.deepEqual(playbackAction('\u001b[B', options), { type: 'playlist_move', delta: 1 });
+  assert.deepEqual(playbackAction('\u001b[1;5A', options), { type: 'offset', deltaMs: 50 });
+  assert.deepEqual(playbackAction('\u001b[1;5B', options), { type: 'offset', deltaMs: -50 });
   assert.deepEqual(playbackAction('\r', options), { type: 'playlist_select', index: 3 });
   assert.deepEqual(playbackAction('\u001b', options), { type: 'close_playlist' });
   assert.deepEqual(playbackAction('\u001b[A'), { type: 'volume', delta: 5 });
@@ -120,6 +126,18 @@ test('只有存在播放队列时快捷提示才显示歌单操作', () => {
   assert.match(playbackShortcutText({ hasPlaylist: true }), /p 歌单/);
   assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Enter 播放/);
   assert.equal(playbackShortcutText({ hasPlaylist: false, playlistOpen: true }).includes('歌单'), false);
+  assert.match(playbackShortcutText(), /Ctrl\+↑\/↓ 偏移/);
+  assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Ctrl\+↑\/↓ 偏移/);
+});
+
+test('播放时间偏移每次调整 50ms 并限制在正负 60000ms', () => {
+  assert.equal(adjustPlaybackOffset(2000, 50), 2050);
+  assert.equal(adjustPlaybackOffset(2000, -50), 1950);
+  assert.equal(adjustPlaybackOffset(59975, 50), 60000);
+  assert.equal(adjustPlaybackOffset(60000, 50), 60000);
+  assert.equal(adjustPlaybackOffset(-59975, -50), -60000);
+  assert.equal(adjustPlaybackOffset(-60000, -50), -60000);
+  assert.equal(adjustPlaybackOffset(Number.NaN, 50), 50);
 });
 
 test('播放时钟支持暂停、继续和前后跳转并限制边界', () => {

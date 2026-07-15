@@ -90,6 +90,9 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
   if (key.toLowerCase() === 'q') return { type: 'quit' };
   if (key.includes('\u001b[1;5D') || key.includes('\u001b[5D')) return { type: 'playlist_previous' };
   if (key.includes('\u001b[1;5C') || key.includes('\u001b[5C')) return { type: 'playlist_next' };
+  // Ctrl+方向键必须先于普通方向键和鼠标序列判断，避免被识别为音量或歌单滚动。
+  if (key.includes('\u001b[1;5A') || key.includes('\u001b[5A')) return { type: 'offset', deltaMs: 50 };
+  if (key.includes('\u001b[1;5B') || key.includes('\u001b[5B')) return { type: 'offset', deltaMs: -50 };
   const sgrMouse = key.match(/\u001b\[<(\d+);\d+;\d+([Mm])/);
   if (sgrMouse) {
     const button = Number(sgrMouse[1]);
@@ -177,6 +180,16 @@ export function rawPosition(displayMs, offsetMs = 0, durationMs = Infinity) {
   const safeDisplay = Number.isFinite(display) ? display : 0;
   if (safeDisplay <= 0) return 0;
   return clamp(safeDisplay + (Number.isFinite(offset) ? offset : 0), 0, maximum);
+}
+
+export function adjustPlaybackOffset(offsetMs, deltaMs) {
+  const current = Number(offsetMs);
+  const delta = Number(deltaMs);
+  return clamp(
+    (Number.isFinite(current) ? current : 0) + (Number.isFinite(delta) ? delta : 0),
+    -60000,
+    60000
+  );
 }
 
 export function lyricPosition(elapsedMs, lyricOffsetMs = 2000) {
@@ -285,9 +298,9 @@ export function playlistViewport(tracks, selectedIndex, currentIndex, capacity) 
 
 export function playbackShortcutText({ playlistOpen = false, hasPlaylist = false } = {}) {
   if (playlistOpen && hasPlaylist) {
-    return 'p/Esc 关闭歌单  ↑/↓ 选择  Enter 播放  Ctrl+←/→ 上/下一首';
+    return 'p/Esc 关闭歌单  ↑/↓ 选择  Enter 播放  Ctrl+←/→ 上/下一首  Ctrl+↑/↓ 偏移';
   }
-  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  t 翻译';
+  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译';
   return hasPlaylist ? `${base}  p 歌单  Ctrl+←/→ 切歌` : base;
 }
 
@@ -575,13 +588,15 @@ export async function playWithProgress({
   signal,
   logger,
   rl,
-  onInterrupt
+  onInterrupt,
+  onOffsetChange
 }) {
   const player = findPlayer();
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
   const lyrics = attachLyricTranslations(parseLrc(lyricSource), parseLrc(translatedLyricSource));
   const clock = createPlaybackClock(durationMs);
+  let activeOffsetMs = adjustPlaybackOffset(lyricOffsetMs, 0);
   let volume = 100;
   const hasTranslation = lyrics.some((line) => Boolean(line.translation));
   let showTranslation = hasTranslation;
@@ -603,7 +618,7 @@ export async function playWithProgress({
   let dispatchPlaybackAction = () => {};
   const smtc = await createSmtcBridge({
     song,
-    durationMs: Math.max(0, displayPosition(durationMs, lyricOffsetMs)),
+    durationMs: Math.max(0, displayPosition(durationMs, activeOffsetMs)),
     playlistControls: playlistTracks.length > 0,
     canPrevious: playlistCurrentIndex > 0,
     canNext: playlistCurrentIndex >= 0 && playlistCurrentIndex < playlistTracks.length - 1,
@@ -620,8 +635,8 @@ export async function playWithProgress({
 
   const updateSmtc = (status, rawPositionMs = clock.position()) => smtc.updatePlayback({
     status,
-    positionMs: Math.max(0, displayPosition(rawPositionMs, lyricOffsetMs)),
-    durationMs: Math.max(0, displayPosition(durationMs, lyricOffsetMs))
+    positionMs: Math.max(0, displayPosition(rawPositionMs, activeOffsetMs)),
+    durationMs: Math.max(0, displayPosition(durationMs, activeOffsetMs))
   });
 
   const spawnAt = (positionMs) => {
@@ -654,8 +669,8 @@ export async function playWithProgress({
     if (!tty || finished) return;
     if (refreshTimer) clearTimeout(refreshTimer);
     const rawElapsedMs = clock.position();
-    const elapsedMs = displayPosition(rawElapsedMs, lyricOffsetMs);
-    const displayDurationMs = Math.max(0, displayPosition(durationMs, lyricOffsetMs));
+    const elapsedMs = displayPosition(rawElapsedMs, activeOffsetMs);
+    const displayDurationMs = Math.max(0, displayPosition(durationMs, activeOffsetMs));
     const lyricElapsedMs = elapsedMs;
     const now = performance.now();
     if (indicator && now >= indicatorUntil) indicator = '';
@@ -674,7 +689,7 @@ export async function playWithProgress({
       playlistSelection
     });
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
-    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, clock.paused, lyricOffsetMs), indicatorDelay));
+    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, clock.paused, activeOffsetMs), indicatorDelay));
   };
 
   const setIndicator = (text) => {
@@ -767,9 +782,9 @@ export async function playWithProgress({
       enqueue(async () => {
         const deltaMs = action.action === 'fast_forward' ? 5000 : action.action === 'rewind' ? -5000 : action.deltaMs;
         const seekTo = action.action === 'seek_absolute'
-          ? clock.seekTo(rawPosition(action.positionMs, lyricOffsetMs, durationMs))
+          ? clock.seekTo(rawPosition(action.positionMs, activeOffsetMs, durationMs))
           : clock.seek(deltaMs);
-        if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, lyricOffsetMs))}`);
+        if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, activeOffsetMs))}`);
         else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
         if (!clock.paused) {
           await stopCurrent();
@@ -789,6 +804,18 @@ export async function playWithProgress({
           await stopCurrent();
           spawnAt(position);
         }
+      });
+      return;
+    }
+    if (action.type === 'offset') {
+      enqueue(async () => {
+        const nextOffsetMs = adjustPlaybackOffset(activeOffsetMs, action.deltaMs);
+        if (nextOffsetMs !== activeOffsetMs) {
+          await onOffsetChange?.(nextOffsetMs);
+          activeOffsetMs = nextOffsetMs;
+        }
+        setIndicator(`播放时间偏移 ${activeOffsetMs} ms`);
+        updateSmtc(clock.paused ? 'paused' : 'playing');
       });
       return;
     }

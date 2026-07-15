@@ -9,6 +9,8 @@ import { clearCookie, loadCookie, saveCookie } from './cookie-store.js';
 import { mergeTranslatedLrc, plainLyrics } from './lyrics.js';
 import { Logger } from './logger.js';
 import { playWithProgress, tryRenderImage } from './media.js';
+import { parsePlaylistExportFormatSelection, playlistExportContent } from './playlist-export.js';
+import { selectTerminalList } from './terminal-list.js';
 import {
   loadSettings, saveSettings, MIN_LYRIC_OFFSET_MS, MAX_LYRIC_OFFSET_MS
 } from './settings-store.js';
@@ -41,7 +43,7 @@ ${chalk.bold('命令')}
   /id <id>                                按 ID 点歌（兼容 id:、ID=、id 空格等写法）
   /idlyric <id> [plain|lrc|trans|all]     按歌曲 ID 直接输出歌词，默认 plain
   /lyric <内容> [plain|lrc|trans|all]     按歌词内容搜索
-  /lspl                                   列出当前用户的歌单
+  /lspl                                   滚动选择当前用户的歌单
   /pl <id>                                预览歌单
   /login                                  扫码登录
   /login <cookie>                         保存并使用已有 Cookie
@@ -57,8 +59,9 @@ ${chalk.bold('命令')}
 
 歌词命令、搜索结果和格式选项均支持 ${chalk.cyan('> 文件名.lrc')} 或 ${chalk.cyan('| 文件名.lrc')}。
 音质 level：${QUALITY_LEVELS.join('、')}。
-歌曲详情：p 播放，l 歌词，u 播放链接，q 返回。
-播放页：q 停止返回，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，t 开关翻译。
+歌曲详情：p 播放，l 歌词，u 播放链接和封面链接，q 返回。
+歌单详情：p 播放，e 选择格式导出列表，u 歌单链接和封面链接，q 返回。
+播放页：q 停止返回，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，Ctrl+↑/↓ 调整偏移 50ms，t 开关翻译。
 歌单播放：p 打开/关闭播放列表，Ctrl+←/→ 切换歌曲；列表中 ↑/↓ 选择、Enter 播放。
 `);
 }
@@ -212,11 +215,15 @@ async function setLyricOffset(settings, milliseconds, logger) {
     console.log(`播放时间偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒。`);
     return false;
   }
-  await saveSettings({ ...settings, lyricOffsetMs: milliseconds });
-  settings.lyricOffsetMs = milliseconds;
-  void logger.info('lyric_offset_changed', { lyricOffsetMs: milliseconds });
+  await persistPlaybackOffset(settings, milliseconds, logger, 'command');
   console.log(`播放时间偏移已设置为：${milliseconds} 毫秒`);
   return true;
+}
+
+async function persistPlaybackOffset(settings, milliseconds, logger, source) {
+  await saveSettings({ ...settings, lyricOffsetMs: milliseconds });
+  settings.lyricOffsetMs = milliseconds;
+  void logger.info('lyric_offset_changed', { lyricOffsetMs: milliseconds, source });
 }
 
 async function handleOffset(rl, settings, command, signal, logger) {
@@ -415,7 +422,9 @@ async function songMenu(rl, api, song, context) {
     }
     if (/^(?:u|url|链接)$/i.test(action)) {
       const result = await api.songUrl(song.id, { signal });
-      console.log(result?.url || unavailableUrlMessage(result, authState));
+      if (result?.url) console.log(`播放链接：${result.url}`);
+      else console.log(unavailableUrlMessage(result, authState));
+      console.log(song.cover ? `封面链接：${song.cover}` : '无封面链接');
       continue;
     }
     if (/^(?:p|play|播放)$/i.test(action)) {
@@ -436,6 +445,9 @@ async function songMenu(rl, api, song, context) {
         signal,
         logger,
         rl,
+        onOffsetChange: (value) => persistPlaybackOffset(
+          context.settings, value, logger, 'playback_hotkey'
+        ),
         onInterrupt: () => shutdown('playback_ctrl_c')
       });
       continue;
@@ -458,23 +470,6 @@ function formatCount(value) {
 
 function playlistLink(id) {
   return `https://music.163.com/#/playlist?id=${id}`;
-}
-
-function playlistExportText(playlist, tracks) {
-  const header = [
-    `歌单：${playlist.name}`,
-    `创建者：${playlistCreatorName(playlist)}`,
-    `ID：${playlist.id}`,
-    `链接：${playlistLink(playlist.id)}`,
-    ''
-  ];
-  const rows = tracks.map((song, index) => [
-    `${index + 1}. ${song.name}`,
-    song.artists?.join('/') || '未知歌手',
-    song.album || '未知专辑',
-    `ID:${song.id}`
-  ].join('\t'));
-  return [...header, ...rows].join('\n');
 }
 
 function parsePlaylistExportAction(raw) {
@@ -518,6 +513,9 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
       signal: context.signal,
       logger: context.logger,
       rl: context.rl,
+      onOffsetChange: (value) => persistPlaybackOffset(
+        context.settings, value, context.logger, 'playback_hotkey'
+      ),
       onInterrupt: () => context.shutdown('playback_ctrl_c')
     });
 
@@ -567,7 +565,8 @@ async function playlistMenu(rl, api, id, context) {
     )).trim();
     if (/^(?:q|b|back|返回)$/i.test(raw)) return;
     if (/^(?:u|url|链接)$/i.test(raw)) {
-      console.log(playlistLink(playlist.id || id));
+      console.log(`歌单链接：${playlistLink(playlist.id || id)}`);
+      console.log(cover ? `封面链接：${cover}` : '无封面链接');
       continue;
     }
     if (/^(?:p|play|播放)$/i.test(raw)) {
@@ -577,9 +576,33 @@ async function playlistMenu(rl, api, id, context) {
     }
     const exportAction = parsePlaylistExportAction(raw);
     if (exportAction) {
-      let target = exportAction.output;
+      let selection = null;
+      while (!selection) {
+        console.log(`
+导出格式：
+  1  仅歌曲（每行一个歌曲名）
+  2  当前方案（歌单信息 + 歌曲详情）
+  3  CSV
+  4  TSV`);
+        const selected = parsePlaylistExportFormatSelection(
+          await ask(rl, '选择格式（可追加 > 文件 或 | 文件，q 返回） > ', context.signal)
+        );
+        if (selected?.quit) break;
+        if (!selected) {
+          console.log('请选择 1、2、3、4，或输入 q 返回。');
+          continue;
+        }
+        if (exportAction.output && selected.output) {
+          console.log('已经在导出命令中指定输出文件，请勿在格式选项中重复指定。请重新选择格式。');
+          continue;
+        }
+        selection = selected;
+      }
+      if (!selection) continue;
+
+      let target = selection.output || exportAction.output;
       if (!target) {
-        console.log('支持 e > 文件 或 e | 文件；已有文件不会被覆盖。');
+        console.log('已有文件不会被覆盖。');
         const entered = (await ask(rl, '输出文件（q 返回） > ', context.signal)).trim();
         if (/^q$/i.test(entered)) continue;
         target = entered.replace(/^(?:>|\|)\s*/, '').trim();
@@ -589,7 +612,7 @@ async function playlistMenu(rl, api, id, context) {
         continue;
       }
       const tracks = await loadFullTracks();
-      await writePlaylist(target, playlistExportText(playlist, tracks));
+      await writePlaylist(target, playlistExportContent(playlist, tracks, selection.format));
       continue;
     }
     console.log('未知选项，请输入 p、e、u 或 q。');
@@ -611,7 +634,26 @@ async function listUserPlaylists(rl, api, context) {
     console.log('当前账号没有歌单。');
     return;
   }
+  let selectedIndex = 0;
+  const tty = Boolean(input.isTTY && output.isTTY && typeof input.setRawMode === 'function');
   while (true) {
+    if (tty) {
+      const selection = await selectTerminalList({
+        rl,
+        items: playlists,
+        initialIndex: selectedIndex,
+        title: '我的歌单',
+        itemText: (playlist, index) => `${String(index + 1).padStart(2)}. ${playlist.name} [${playlist.id}] ${playlist.trackCount ?? 0} 首`,
+        signal: context.signal,
+        onInterrupt: () => context.shutdown('playlist_list_ctrl_c'),
+        input,
+        output
+      });
+      if (selection === null) return;
+      selectedIndex = selection;
+      await playlistMenu(rl, api, playlists[selectedIndex].id, context);
+      continue;
+    }
     console.log(chalk.bold('\n我的歌单'));
     playlists.forEach((playlist, index) => {
       console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${playlist.name} ${chalk.gray(`[${playlist.id}] ${playlist.trackCount ?? 0} 首`)}`);
@@ -623,6 +665,7 @@ async function listUserPlaylists(rl, api, context) {
       console.log('无效序号。');
       continue;
     }
+    selectedIndex = selection.index;
     await playlistMenu(rl, api, playlists[selection.index].id, context);
   }
 }
