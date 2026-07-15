@@ -6,7 +6,7 @@
 
 要求 Node.js 22+，播放功能还需安装以下任一播放器并加入 `PATH`：`ffplay`、`mpv`、`vlc`。
 
-Windows Terminal 与 GNOME Terminal 用户若希望获得更稳定的封面/二维码图像显示，可额外安装 `chafa`；程序会依次尝试 `chafa`、内置 ANSI 24-bit 半块字符和终端图片协议。
+Windows Terminal 1.22+ 用户若安装了 `chafa`，封面会优先通过原生 SIXEL 图形显示；Kitty/iTerm2 兼容终端则优先使用各自的原生图形协议。未确认协议支持或编码失败时，程序会安全降级到 `chafa` 字符图和内置 ANSI 24-bit 半块字符，不会盲发图形控制序列；无需另装 `img2sixel`。
 
 ```bash
 npm install
@@ -48,7 +48,7 @@ id 347230
 /lyric 风雨里追赶 lrc > lyrics.lrc   选择歌曲后写入原始 LRC
 ```
 
-歌词格式为 `plain`、`lrc`、`trans`、`all`。歌词搜索结果支持 `1 > output.lrc`；未在命令中指定格式时，会继续显示格式菜单，格式选项同样支持 `1 > output.lrc`。所有结果、详情和格式菜单均可输入 `q` 返回上一级。
+歌词格式为 `plain`、`lrc`、`trans`、`all`。歌词搜索结果支持 `1 > output.lrc` 或 `1 | output.lrc`；未在命令中指定格式时，会继续显示格式菜单，格式选项同样支持 `1 > output.lrc` 或 `1 | output.lrc`。所有结果、详情和格式菜单均可输入 `q` 返回上一级。
 
 登录：
 
@@ -56,21 +56,31 @@ id 347230
 /login
 /login MUSIC_U=你的值; __csrf=你的值
 /login status
+/signout
 ```
 
-无参数 `/login` 始终打印登录链接，然后按“字符二维码 → 与封面相同的图像渲染 → 仅链接”降级。登录成功后 Cookie 会清理为标准 Cookie Header 格式并缓存到操作系统的用户配置目录；旧版缓存会在启动时自动迁移。后续每个 API 请求都会携带 Cookie header。可用 `/login status` 向服务端验证当前登录状态，可用 `NCM_CLI_CONFIG_DIR` 自定义缓存目录。
+无参数 `/login` 始终打印登录链接，然后按“字符二维码 → 与封面相同的图像渲染 → 仅链接”降级。登录成功后 Cookie 会清理为标准 Cookie Header 格式并缓存到操作系统的用户配置目录；旧版缓存会在启动时自动迁移。后续每个 API 请求都会携带 Cookie header。`/login status` 会向服务端验证状态，并在接口返回相应字段时显示昵称、用户 ID、账号 ID、等级、会员类型、累计听歌及关注信息，绝不显示 Cookie。`/signout` 会尝试通知服务端退出，并可靠地清除内存及磁盘 Cookie；重复执行也是安全的。可用 `NCM_CLI_CONFIG_DIR` 自定义缓存目录。
+
+播放音质可交互选择或直接设置，并单独持久化到 `settings.json`，不会覆盖 Cookie：
+
+```text
+/quality
+/quality lossless
+```
+
+支持 `standard`（标准）、`higher`（较高）、`exhigh`（极高）、`lossless`（无损）、`hires`（Hi-Res）、`jyeffect`（高清环绕声）、`sky`（沉浸环绕声）、`dolby`（杜比全景声）、`jymaster`（超清母带）。实际可用音质仍取决于账号会员权限和歌曲资源。
 
 选中歌曲后可使用：
 
 ```text
 p                       进入全屏播放页
 l                       选择纯歌词、原始 LRC、翻译 LRC 或合并 LRC
-l > lyrics.lrc          在格式菜单选择后写入文件
+l > lyrics.lrc          在格式菜单选择后写入文件（也支持 l | lyrics.lrc）
 u                 打印播放链接
 q                 返回上一级
 ```
 
-封面依次通过 `chafa`、内置 ANSI 24-bit 半块字符和终端图片协议绘制，面向 Windows Terminal/GNOME Terminal，失败时静默跳过。目标文件已存在时程序会拒绝覆盖。播放链接可能因登录状态、会员、地区或版权限制为空，这是上游 API/网易云权限限制。
+封面依次尝试已确认支持的原生终端图形协议（Windows Terminal 1.22+ 使用 `chafa` 编码 SIXEL，Kitty/iTerm2 使用对应协议）、`chafa` 字符图和内置 ANSI 24-bit 半块字符，失败时静默跳过。目标文件已存在时程序会拒绝覆盖。播放链接可能因登录状态、会员、地区或版权限制为空，这是上游 API/网易云权限限制。
 
 歌曲详情会先显示尺寸稍大的封面，再显示元数据；封面无法渲染时保持静默，不再打印链接。
 
@@ -80,6 +90,8 @@ q                 返回上一级
 q       停止播放并返回歌曲详情
 空格    暂停/继续
 ← / →   后退/前进 5 秒
+↑ / ↓   提高/降低音量
+t       开关翻译歌词
 Ctrl+C  退出程序
 ```
 

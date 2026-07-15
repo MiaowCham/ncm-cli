@@ -10,14 +10,19 @@ function cookieFromHeaders(headers) {
 }
 
 export class NcmApi {
-  constructor({ baseUrl = process.env.NCM_API_BASE_URL || DEFAULT_BASE_URL, cookie = null, logger = null } = {}) {
+  constructor({ baseUrl = process.env.NCM_API_BASE_URL || DEFAULT_BASE_URL, cookie = null, logger = null, quality = 'standard' } = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.cookie = cookie;
     this.logger = logger;
+    this.quality = quality;
   }
 
   setCookie(cookie) {
     this.cookie = cookie;
+  }
+
+  setQuality(quality) {
+    this.quality = quality;
   }
 
   async request(endpoint, params = {}, { timeoutMs = 20000, signal } = {}) {
@@ -96,7 +101,7 @@ export class NcmApi {
   async songUrl(id, options = {}) {
     const attempts = [];
     for (const [endpoint, params] of [
-      ['/song/url/v1', { id, level: 'standard' }],
+      ['/song/url/v1', { id, level: this.quality }],
       ['/song/url', { id, br: 320000 }]
     ]) {
       try {
@@ -145,5 +150,15 @@ export class NcmApi {
     const account = data.data?.account || data.account || null;
     const profile = data.data?.profile || data.profile || null;
     return { loggedIn: Boolean(account && profile), account, profile, code: data.data?.code || data.code || null };
+  }
+
+  async userLevel(options = {}) {
+    const { data } = await this.request('/user/level', {}, options);
+    return data.data || null;
+  }
+
+  async logout(options = {}) {
+    const { data } = await this.request('/logout', {}, options);
+    return { code: data.code ?? null };
   }
 }
