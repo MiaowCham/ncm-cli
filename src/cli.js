@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import chalk from 'chalk';
 import qrcode from 'qrcode-terminal';
-import { NcmApi } from './api.js';
+import { NcmApi, normalizeApiBaseUrl } from './api.js';
 import { clearCookie, loadCookie, saveCookie } from './cookie-store.js';
 import { mergeTranslatedLrc, plainLyrics } from './lyrics.js';
 import { Logger } from './logger.js';
@@ -19,6 +19,7 @@ import {
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
   parseNumberSelection, parseOffsetCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
   parseListPlaylistsCommand, parsePlaylistCommand,
+  parseApiCommand,
   QUALITY_LEVELS
 } from './parsers.js';
 
@@ -53,6 +54,8 @@ ${chalk.bold('命令')}
   /quality <level>                        直接设置播放音质
   /offset                                 查看并设置播放时间偏移
   /offset <毫秒>                          直接设置播放时间偏移（默认 2000）
+  /api                                    查看并更换 API 地址
+  /api <url>                              直接更换 API 地址
   /clear                                  清空终端并返回搜索
   /help                                   显示帮助
   /quit                                   退出程序
@@ -64,6 +67,91 @@ ${chalk.bold('命令')}
 播放页：q 停止返回，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，Ctrl+↑/↓ 调整偏移 50ms，t 开关翻译。
 歌单播放：p 打开/关闭播放列表，Ctrl+←/→ 切换歌曲；列表中 ↑/↓ 选择、Enter 播放。
 `);
+}
+
+const API_COMPATIBILITY_NOTICE = '仅兼容 neteasecloudmusicapienhanced/api-enhanced 提供的 API。';
+
+async function configureInitialApiBaseUrl(rl, settings, signal, logger) {
+  const environmentUrl = process.env.NCM_API_BASE_URL?.trim();
+  if (environmentUrl) {
+    const baseUrl = normalizeApiBaseUrl(environmentUrl);
+    const notify = output.isTTY ? console.log : console.error;
+    notify(`本次启动使用环境变量 NCM_API_BASE_URL：${baseUrl}`);
+    notify('环境变量仅覆盖本次启动，不会改写已保存的 API 地址。');
+    return { baseUrl, fromEnvironment: true };
+  }
+  if (settings.apiBaseUrl) {
+    return { baseUrl: normalizeApiBaseUrl(settings.apiBaseUrl), fromEnvironment: false };
+  }
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error(
+      `尚未配置 API 地址。请在交互式终端首次启动完成配置，或设置 NCM_API_BASE_URL。${API_COMPATIBILITY_NOTICE}`
+    );
+  }
+
+  console.log('首次启动需要配置 API 地址。');
+  console.log(API_COMPATIBILITY_NOTICE);
+  while (true) {
+    const raw = (await ask(rl, 'API 地址（例如 https://example.com） > ', signal)).trim();
+    let baseUrl;
+    try {
+      baseUrl = normalizeApiBaseUrl(raw);
+    } catch (error) {
+      console.log(`API 地址无效：${error.message}`);
+      continue;
+    }
+    await saveSettings({ ...settings, apiBaseUrl: baseUrl });
+    settings.apiBaseUrl = baseUrl;
+    void logger.info('api_base_url_configured', { baseUrl, source: 'first_run' });
+    console.log(`API 地址已保存：${baseUrl}`);
+    return { baseUrl, fromEnvironment: false };
+  }
+}
+
+async function applyApiBaseUrl(api, context, value, source) {
+  const baseUrl = normalizeApiBaseUrl(value);
+  await saveSettings({ ...context.settings, apiBaseUrl: baseUrl });
+  context.settings.apiBaseUrl = baseUrl;
+  api.setBaseUrl(baseUrl);
+  const environmentWillOverride = Boolean(process.env.NCM_API_BASE_URL?.trim());
+  context.apiFromEnvironment = false;
+  void context.logger.info('api_base_url_changed', { baseUrl, source });
+  console.log(`API 地址已更换并保存：${baseUrl}`);
+  if (environmentWillOverride) {
+    console.log('注意：下次启动时 NCM_API_BASE_URL 仍会优先于已保存的地址。');
+  }
+  await refreshAuthState(api, context.authState, context.signal, context.logger);
+  if (!context.authState.verified) {
+    console.log('暂时无法连接或验证新 API；地址已保留，可检查服务状态后重试。');
+    console.log(`诊断日志：${context.logger.file}`);
+  }
+  printLoginStatus(context.authState);
+}
+
+async function handleApiCommand(rl, api, context, command) {
+  if (command.url) {
+    await applyApiBaseUrl(api, context, command.url, 'command');
+    return;
+  }
+  console.log(`当前 API 地址：${api.baseUrl}`);
+  console.log(API_COMPATIBILITY_NOTICE);
+  if (!input.isTTY || !output.isTTY) {
+    console.log('非交互模式请使用 /api <url> 更换地址。');
+    return;
+  }
+  while (true) {
+    const raw = (await ask(rl, '输入新 API 地址，或输入 q 返回 > ', context.signal)).trim();
+    if (/^q$/i.test(raw)) return;
+    let baseUrl;
+    try {
+      baseUrl = normalizeApiBaseUrl(raw);
+    } catch (error) {
+      console.log(`API 地址无效：${error.message}`);
+      continue;
+    }
+    await applyApiBaseUrl(api, context, baseUrl, 'interactive');
+    return;
+  }
 }
 
 function printSearchResults(songs) {
@@ -732,6 +820,11 @@ async function lyricSearchFlow(rl, api, command, context) {
 
 async function resolveInput(rl, api, raw, context) {
   const { authState, signal, logger } = context;
+  const apiCommand = parseApiCommand(raw);
+  if (apiCommand) {
+    await handleApiCommand(rl, api, context, apiCommand);
+    return;
+  }
   if (parseClearCommand(raw)) {
     output.write('\x1b[2J\x1b[H');
     return;
@@ -820,11 +913,27 @@ export async function main(args = []) {
   process.once('SIGTERM', onSigterm);
 
   try {
+    rl = createInterface({ input, output });
+    rl.on('SIGINT', onSigint);
     const cookie = await loadCookie();
     const settings = await loadSettings();
-    const api = new NcmApi({ cookie, logger, quality: settings.quality });
+    const startupApiCommand = args.length ? parseApiCommand(args.join(' ')) : null;
+    let apiConfiguredFromArguments = false;
+    if (!settings.apiBaseUrl && startupApiCommand?.url && !process.env.NCM_API_BASE_URL?.trim()) {
+      const baseUrl = normalizeApiBaseUrl(startupApiCommand.url);
+      await saveSettings({ ...settings, apiBaseUrl: baseUrl });
+      settings.apiBaseUrl = baseUrl;
+      apiConfiguredFromArguments = true;
+      console.log(API_COMPATIBILITY_NOTICE);
+      console.log(`API 地址已保存：${baseUrl}`);
+    }
+    const apiConfiguration = await configureInitialApiBaseUrl(rl, settings, controller.signal, logger);
+    const api = new NcmApi({
+      baseUrl: apiConfiguration.baseUrl, cookie, logger, quality: settings.quality
+    });
     void logger.info('startup', {
-      cookiePresent: Boolean(cookie), quality: settings.quality, lyricOffsetMs: settings.lyricOffsetMs
+      cookiePresent: Boolean(cookie), quality: settings.quality, lyricOffsetMs: settings.lyricOffsetMs,
+      baseUrl: api.baseUrl, apiFromEnvironment: apiConfiguration.fromEnvironment
     });
 
     if (/^idlyric$/i.test(args[0] || '') && /^\d+$/.test(args[1] || '')) {
@@ -833,8 +942,6 @@ export async function main(args = []) {
       return;
     }
 
-    rl = createInterface({ input, output });
-    rl.on('SIGINT', onSigint);
     const authState = { loggedIn: false, verified: false, account: null, profile: null, level: null };
     await refreshAuthState(api, authState, controller.signal, logger);
 
@@ -844,8 +951,11 @@ export async function main(args = []) {
     console.log(`日志：${logger.file}`);
     console.log('输入 /help 查看命令。');
 
-    const context = { authState, signal: controller.signal, logger, settings, shutdown };
-    if (args.length) await resolveInput(rl, api, args.join(' '), context);
+    const context = {
+      authState, signal: controller.signal, logger, settings, shutdown,
+      apiFromEnvironment: apiConfiguration.fromEnvironment
+    };
+    if (args.length && !apiConfiguredFromArguments) await resolveInput(rl, api, args.join(' '), context);
     while (!controller.signal.aborted) {
       const prompt = authState.loggedIn ? '\n搜索歌曲、输入 ID 点歌 > ' : '\n搜索歌曲、输入 ID 点歌，或 /login > ';
       let raw;

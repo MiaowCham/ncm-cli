@@ -1,6 +1,6 @@
 # NCM CLI 点歌台
 
-一个基于 [NeteaseCloudMusicApi 服务](https://ncmapi.miaowcham.com/docs/#/) 的简单交互式点歌 CLI，支持歌曲搜索、歌词内容搜索、ID 直达、扫码登录或 Cookie 登录、歌词、播放链接、封面降级显示，以及带进度条和逐行歌词的本机播放。
+一个基于 [neteasecloudmusicapienhanced/api-enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced) 的简单交互式点歌 CLI，支持歌曲搜索、歌词内容搜索、ID 直达、扫码登录或 Cookie 登录、歌词、播放链接、封面降级显示，以及带进度条和逐行歌词的本机播放。
 
 ## 安装与运行
 
@@ -22,7 +22,13 @@ npm install -g .
 ncm
 ```
 
-API 地址默认为 `https://ncmapi.miaowcham.com`，可通过 `NCM_API_BASE_URL` 覆盖。
+首次启动且尚未保存设置时，程序会要求填写 API 地址并保存到 `settings.json`，不再使用硬编码的默认服务。程序仅兼容
+[neteasecloudmusicapienhanced/api-enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced)
+提供的 API，请填写由该项目部署的服务地址。
+
+设置 `NCM_API_BASE_URL` 可仅对本次启动覆盖已保存地址；非交互式调用若尚未配置，则必须提供该环境变量。
+交互界面可使用 `/api` 查看并输入新地址，或使用 `/api <url>` 直接保存并立即切换。切换后程序会重新验证当前
+Cookie 在新服务上的登录状态；若服务暂时无法连接，用户明确保存的地址仍会保留。
 
 ## 操作
 
@@ -36,8 +42,10 @@ id 347230
 /id <id>
 /lspl
 /pl <id>
+/api
+/api https://your-api.example.com
 /clear
-/lyrics 风雨里追赶
+/lyric 风雨里追赶
 歌词:风雨里追赶
 ```
 

@@ -50,6 +50,12 @@ export function parseOffsetCommand(input) {
   return { milliseconds: Number(argument) };
 }
 
+export function parseApiCommand(input) {
+  const match = input.trim().match(/^\/api(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  return { url: match[1]?.trim() || null };
+}
+
 export function parseLyricAction(input) {
   const match = input.trim().match(/^\/?(?:l|lyric|歌词)(?:\s*(?:>|\|)\s*(.+))?$/i);
   if (!match) return null;

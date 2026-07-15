@@ -1,6 +1,19 @@
 import { normalizeSong } from './parsers.js';
 
-export const DEFAULT_BASE_URL = 'https://ncmapi.miaowcham.com';
+export function normalizeApiBaseUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('API 地址不能为空');
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error('API 地址格式无效');
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('API 地址仅支持 http 或 https');
+  if (url.username || url.password) throw new Error('API 地址不能包含用户名或密码');
+  if (url.search || url.hash) throw new Error('API 地址不能包含查询参数或片段');
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  return url.pathname === '/' ? url.origin : `${url.origin}${url.pathname}`;
+}
 
 function cookieFromHeaders(headers) {
   const values = typeof headers.getSetCookie === 'function'
@@ -39,8 +52,9 @@ function isLikedPlaylist(playlist) {
 }
 
 export class NcmApi {
-  constructor({ baseUrl = process.env.NCM_API_BASE_URL || DEFAULT_BASE_URL, cookie = null, logger = null, quality = 'standard' } = {}) {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+  constructor({ baseUrl, cookie = null, logger = null, quality = 'standard' } = {}) {
+    if (!baseUrl) throw new Error('尚未配置 API 地址，请先设置兼容 api-enhanced 的服务地址');
+    this.baseUrl = normalizeApiBaseUrl(baseUrl);
     this.cookie = cookie;
     this.logger = logger;
     this.quality = quality;
@@ -50,12 +64,17 @@ export class NcmApi {
     this.cookie = cookie;
   }
 
+  setBaseUrl(baseUrl) {
+    this.baseUrl = normalizeApiBaseUrl(baseUrl);
+  }
+
   setQuality(quality) {
     this.quality = quality;
   }
 
   async request(endpoint, params = {}, { timeoutMs = 20000, signal } = {}) {
-    const url = new URL(endpoint, `${this.baseUrl}/`);
+    const relativeEndpoint = String(endpoint).replace(/^\/+/, '');
+    const url = new URL(relativeEndpoint, `${this.baseUrl}/`);
     for (const [key, value] of Object.entries({ ...params, timestamp: Date.now() })) {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     }
