@@ -51,7 +51,12 @@ function httpsUri(value) {
 }
 
 function metadataFrom(song = {}, durationMs = 0, coverPath, overrides = {}) {
-  const source = { ...song, ...overrides };
+  const normalizedOverrides = {
+    ...overrides,
+    ...(overrides.title == null && overrides.name != null ? { title: overrides.name } : {}),
+    ...(overrides.trackId == null && overrides.id != null ? { trackId: overrides.id } : {})
+  };
+  const source = { ...song, ...normalizedOverrides };
   const artists = Array.isArray(source.artists) ? source.artists.join('/') : source.artist;
   const metadata = {
     trackId: String(source.trackId ?? source.id ?? ''),

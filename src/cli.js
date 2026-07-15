@@ -843,9 +843,25 @@ async function listUserPlaylists(rl, api, context) {
 }
 
 async function chooseSong(rl, api, songs, context) {
+  if (input.isTTY && output.isTTY && typeof input.setRawMode === 'function') {
+    const selectedIndex = await selectTerminalList({
+      rl,
+      items: songs,
+      title: '搜索结果',
+      hint: '↑/↓ 或滚轮选择  Enter 查看  q/Esc 返回主页',
+      itemText: (song, index) => `${String(index + 1).padStart(2)}. ${song.name} — ${song.artists.join('/') || '未知歌手'} [${song.id}] ${formatDuration(song.durationMs)}`,
+      signal: context.signal,
+      onInterrupt: () => context.shutdown('search_list_ctrl_c')
+    });
+    if (selectedIndex == null) return;
+    const detail = await api.songDetail(songs[selectedIndex].id, { signal: context.signal });
+    await songMenu(rl, api, detail, context);
+    return;
+  }
+
   while (true) {
     printSearchResults(songs);
-    const raw = (await ask(rl, '选择序号，q 返回搜索：', context.signal)).trim();
+    const raw = (await ask(rl, '选择序号，q 返回主页：', context.signal)).trim();
     const selection = parseNumberSelection(raw);
     if (!selection) {
       console.log('无效序号。');
@@ -863,6 +879,7 @@ async function chooseSong(rl, api, songs, context) {
     }
     const detail = await api.songDetail(song.id, { signal: context.signal });
     await songMenu(rl, api, detail, context);
+    return;
   }
 }
 

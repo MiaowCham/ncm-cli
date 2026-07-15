@@ -67,6 +67,7 @@ export async function selectTerminalList({
   items,
   initialIndex = 0,
   title = '请选择',
+  hint = '↑/↓ 或滚轮选择  Enter 查看  q/Esc 返回',
   itemText = (item) => String(item),
   signal,
   onInterrupt,
@@ -88,7 +89,7 @@ export async function selectTerminalList({
     const viewport = terminalListViewport(items.length, selectedIndex, Math.max(1, rows - 3), viewportStart);
     viewportStart = viewport.start;
     selectedIndex = viewport.selectedIndex;
-    const lines = [chalk.bold(truncatePlain(title, columns)), chalk.gray('↑/↓ 或滚轮选择  Enter 查看  q/Esc 返回')];
+    const lines = [chalk.bold(truncatePlain(title, columns)), chalk.gray(truncatePlain(hint, columns))];
     for (let index = viewport.start; index < viewport.end; index += 1) {
       const prefix = index === selectedIndex ? '› ' : '  ';
       const line = truncatePlain(`${prefix}${itemText(items[index], index)}`, columns);
