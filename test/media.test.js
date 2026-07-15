@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attachLyricTranslations, createPlaybackClock, imageProtocolOrder, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playerArguments, sixelPaddingRows, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
+import { attachLyricTranslations, createPlaybackClock, imageProtocolOrder, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playerArguments, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
   assert.equal(supportsSixelEnvironment({ env: { WT_SESSION: 'session' }, platform: 'win32', windowsTerminalVersion: '1.21.9999.0' }), false);
@@ -13,14 +13,6 @@ test('图像协议优先原生图形并保留安全降级顺序', () => {
   assert.deepEqual(imageProtocolOrder({ nativeGraphics: true, sixel: true, chafa: true }), ['native', 'sixel', 'symbols', 'ansi']);
   assert.deepEqual(imageProtocolOrder({ nativeGraphics: false, sixel: true, chafa: false }), ['ansi']);
   assert.deepEqual(imageProtocolOrder({ nativeGraphics: false, sixel: false, chafa: true }), ['symbols', 'ansi']);
-});
-
-test('SIXEL 输出后补足终端图像占用行数', () => {
-  const chafaOutput = Buffer.from('\x1bPqSIXEL\x1b\\\r\n\x1b[?25h', 'latin1');
-  assert.equal(sixelPaddingRows(20, chafaOutput), 19);
-  assert.equal(sixelPaddingRows(1, chafaOutput), 0);
-  assert.equal(sixelPaddingRows(5, '\x1bPqSIXEL\x1b\\'), 5);
-  assert.equal(sixelPaddingRows(2, '\x1bPqSIXEL\x1b\\\n\n'), 0);
 });
 
 test('刷新间隔取下一秒与下一行歌词中的较早者', () => {
@@ -69,14 +61,15 @@ test('播放时钟支持暂停、继续和前后跳转并限制边界', () => {
   assert.equal(clock.seekTo(20000), 10000);
 });
 
-test('歌词视窗不超过容量并标记已播放与未播放', () => {
+test('歌词视窗只显示当前行和未来行且不超过容量', () => {
   const lines = Array.from({ length: 10 }, (_, index) => ({ timeMs: index * 1000, text: `line-${index}` }));
   const viewport = lyricViewport(lines, 3500, 5);
   assert.equal(viewport.length, 5);
   assert.ok(viewport.some((line) => line.played));
   assert.ok(viewport.some((line) => !line.played));
   assert.equal(viewport.filter((line) => line.current).length, 1);
-  assert.equal(viewport.filter((line) => line.played && !line.current).length, 1);
+  assert.equal(viewport.filter((line) => line.played && !line.current).length, 0);
+  assert.equal(viewport[0].text, 'line-3');
   assert.equal(lyricViewport(lines, 3500, 1)[0].text, 'line-3');
 });
 
@@ -104,11 +97,16 @@ test('翻译按实际终端行数裁剪且极小容量不溢出', () => {
   ];
   const rows = playbackLyricRows(lines, 1500, 3, true);
   assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map((line) => line.text), ['过去', '当前', 'current']);
+  assert.deepEqual(rows.map((line) => line.text), ['当前', 'current', '未来']);
   assert.deepEqual(playbackLyricRows(lines, 1500, 0, true), []);
   assert.deepEqual(playbackLyricRows(lines, 1500, 1, true).map((line) => line.text), ['当前']);
   assert.deepEqual(playbackLyricRows(lines, 1500, 2, true).map((line) => line.text), ['当前', 'current']);
-  assert.deepEqual(playbackLyricRows(lines, 1500, 4, true).map((line) => line.text), ['过去', '当前', 'current', '未来']);
+  assert.deepEqual(playbackLyricRows(lines, 1500, 4, true).map((line) => line.text), ['当前', 'current', '未来', 'future']);
+});
+
+test('未播放的原文和翻译使用相同的颜色角色', () => {
+  assert.equal(lyricTone({ current: false, played: false, translation: false }), 'future');
+  assert.equal(lyricTone({ current: false, played: false, translation: true }), 'future');
 });
 
 test('没有翻译时切换键保持关闭并提示暂无翻译', () => {

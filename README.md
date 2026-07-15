@@ -34,6 +34,7 @@ id:347230
 ID=347230
 id 347230
 /id 347230
+/clear
 /lyrics 风雨里追赶
 歌词:风雨里追赶
 ```
@@ -70,6 +71,8 @@ id 347230
 /quality lossless
 ```
 
+输入 `/clear` 可清空当前终端内容并回到主搜索提示，不会退出程序或清除登录状态。
+
 支持 `standard`（标准）、`higher`（较高）、`exhigh`（极高）、`lossless`（无损）、`hires`（Hi-Res）、`jyeffect`（高清环绕声）、`sky`（沉浸环绕声）、`dolby`（杜比全景声）、`jymaster`（超清母带）。实际可用音质仍取决于账号会员权限和歌曲资源。
 
 选中歌曲后可使用：
@@ -78,8 +81,8 @@ id 347230
 p                       进入全屏播放页
 l                       选择纯歌词、原始 LRC、翻译 LRC 或合并 LRC
 l > lyrics.lrc          在格式菜单选择后写入文件（也支持 l | lyrics.lrc）
-u                 打印播放链接
-q                 返回上一级
+u                       打印播放链接
+q                       返回上一级
 ```
 
 封面依次尝试已确认支持的原生终端图形协议（Windows Terminal 1.22+ 使用 `chafa` 编码 SIXEL，Kitty/iTerm2 使用对应协议）、`chafa` 字符图和内置 ANSI 24-bit 半块字符，失败时静默跳过。目标文件已存在时程序会拒绝覆盖。播放链接可能因登录状态、会员、地区或版权限制为空，这是上游 API/网易云权限限制。

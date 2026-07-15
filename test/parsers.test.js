@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection,
-  parseQualityCommand, parseSignoutCommand
+  parseQualityCommand, parseSignoutCommand, parseClearCommand
 } from '../src/parsers.js';
 
 test('识别所有约定的 ID 点歌语法', () => {
@@ -23,6 +23,13 @@ test('识别登出命令', () => {
   assert.equal(parseSignoutCommand('/signout'), true);
   assert.equal(parseSignoutCommand(' /SIGNOUT '), true);
   assert.equal(parseSignoutCommand('/signout now'), false);
+});
+
+test('识别清屏命令', () => {
+  assert.equal(parseClearCommand('/clear'), true);
+  assert.equal(parseClearCommand(' /CLEAR '), true);
+  assert.equal(parseClearCommand('/clear now'), false);
+  assert.equal(parseClearCommand('clear'), false);
 });
 
 test('识别音质命令', () => {
