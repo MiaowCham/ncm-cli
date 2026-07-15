@@ -62,6 +62,8 @@ internal static class Protocol
         SystemMediaTransportControlsButton.Stop => "stop",
         SystemMediaTransportControlsButton.FastForward => "fast_forward",
         SystemMediaTransportControlsButton.Rewind => "rewind",
+        SystemMediaTransportControlsButton.Previous => "previous",
+        SystemMediaTransportControlsButton.Next => "next",
         _ => null
     };
 

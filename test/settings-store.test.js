@@ -36,7 +36,7 @@ test('缺失或非法设置回退默认值，保存时拒绝非法值', async ()
       quality: 'standard', lyricOffsetMs: DEFAULT_LYRIC_OFFSET_MS
     });
     await assert.rejects(saveSettings({ quality: 'unsupported' }, file), /不支持的音质等级/);
-    await assert.rejects(saveSettings({ lyricOffsetMs: 60001 }, file), /歌词偏移量/);
+    await assert.rejects(saveSettings({ lyricOffsetMs: 60001 }, file), /播放时间偏移量/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

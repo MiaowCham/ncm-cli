@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attachLyricTranslations, createPlaybackClock, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playerArguments, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
+import { attachLyricTranslations, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
   assert.equal(supportsSixelEnvironment({ env: { WT_SESSION: 'session' }, platform: 'win32', windowsTerminalVersion: '1.21.9999.0' }), false);
@@ -31,6 +31,23 @@ test('歌词位置默认延后两秒并支持正负毫秒偏移', () => {
   assert.equal(lyricPosition(3000, Number.NaN), 1000);
 });
 
+test('全局 offset 在展示时间与播放器原始时间之间双向换算', () => {
+  assert.equal(displayPosition(5000, 2000), 3000);
+  assert.equal(rawPosition(3000, 2000), 5000);
+  assert.equal(rawPosition(0, 2000), 0);
+  assert.equal(rawPosition(-1000, 2000), 0);
+  assert.equal(displayPosition(5000, -500), 5500);
+  assert.equal(rawPosition(5500, -500), 5000);
+  assert.equal(rawPosition(0, -500), 0);
+  const rawDuration = 240000;
+  const displayedDuration = displayPosition(rawDuration, 2000);
+  assert.equal(rawPosition(displayedDuration, 2000, rawDuration), rawDuration);
+  assert.equal(rawPosition(displayedDuration + 5000, 2000, rawDuration), rawDuration);
+  assert.equal(displayPosition(5000 + 5000, 2000) - displayPosition(5000, 2000), 5000);
+  assert.equal(displayPosition(Number.NaN, Number.NaN), 0);
+  assert.equal(rawPosition(Number.NaN, Number.NaN), 0);
+});
+
 test('歌词偏移在时间戳边界精确切换当前行', () => {
   const lines = [
     { timeMs: 0, text: '第一行' },
@@ -57,9 +74,52 @@ test('播放快捷键解析退出、暂停、跳转、音量、翻译与 Ctrl+C'
   assert.deepEqual(playbackAction('\u001b[A'), { type: 'volume', delta: 5 });
   assert.deepEqual(playbackAction('\u001b[B'), { type: 'volume', delta: -5 });
   assert.deepEqual(playbackAction('t'), { type: 'toggle_translation' });
+  assert.deepEqual(playbackAction('p'), { type: 'toggle_playlist' });
+  assert.deepEqual(playbackAction('\u001b[1;5D'), { type: 'playlist_previous' });
+  assert.deepEqual(playbackAction('\u001b[5D'), { type: 'playlist_previous' });
+  assert.deepEqual(playbackAction('\u001b[1;5C'), { type: 'playlist_next' });
+  assert.deepEqual(playbackAction('\u001b[5C'), { type: 'playlist_next' });
+  assert.deepEqual(playbackAction(`prefix\u001b[1;5Dsuffix`), { type: 'playlist_previous' });
+  assert.deepEqual(playbackAction(`\u001b[D\u001b[1;5C`), { type: 'playlist_next' });
   assert.deepEqual(playbackAction('quit'), { type: 'ignore' });
   assert.deepEqual(playbackAction('text'), { type: 'ignore' });
   assert.deepEqual(playbackAction('\u0003'), { type: 'interrupt' });
+});
+
+test('歌单覆盖层接管上下键、Enter 和 Esc', () => {
+  const options = { playlistOpen: true, playlistSelection: 3 };
+  assert.deepEqual(playbackAction('\u001b[A', options), { type: 'playlist_move', delta: -1 });
+  assert.deepEqual(playbackAction('\u001b[B', options), { type: 'playlist_move', delta: 1 });
+  assert.deepEqual(playbackAction('\r', options), { type: 'playlist_select', index: 3 });
+  assert.deepEqual(playbackAction('\u001b', options), { type: 'close_playlist' });
+  assert.deepEqual(playbackAction('\u001b[A'), { type: 'volume', delta: 5 });
+});
+
+test('SGR 滚轮只在歌单覆盖层中移动选择且不影响音量', () => {
+  const open = { playlistOpen: true, playlistSelection: 3 };
+  assert.deepEqual(playbackAction('\u001b[<64;10;5M', open), { type: 'playlist_move', delta: -1 });
+  assert.deepEqual(playbackAction('\u001b[<65;10;5M', open), { type: 'playlist_move', delta: 1 });
+  assert.deepEqual(playbackAction('\u001b[<68;10;5M', open), { type: 'playlist_move', delta: -1 });
+  assert.deepEqual(playbackAction('\u001b[<81;10;5M', open), { type: 'playlist_move', delta: 1 });
+  assert.deepEqual(playbackAction('\u001b[<64;10;5m', open), { type: 'ignore' });
+  assert.deepEqual(playbackAction('\u001b[<64;10;5M'), { type: 'ignore' });
+  assert.deepEqual(playbackAction('\u001b[<0;10;5M', open), { type: 'ignore' });
+  assert.deepEqual(playbackAction('\u001b[<0;10;5m', open), { type: 'ignore' });
+  assert.deepEqual(playbackAction('\u001b[A'), { type: 'volume', delta: 5 });
+  assert.deepEqual(playbackAction('\u001b[B', open), { type: 'playlist_move', delta: 1 });
+  assert.deepEqual(playbackAction('\u001b[<64;1;1M\u001b[1;5C', open), { type: 'playlist_next' });
+});
+
+test('播放页鼠标报告模式进入与退出序列成对恢复', () => {
+  assert.equal(playbackTerminalModeSequence(true), '\u001b[?1007l\u001b[?1000h\u001b[?1006h');
+  assert.equal(playbackTerminalModeSequence(false), '\u001b[?1000l\u001b[?1006l\u001b[?1007h');
+});
+
+test('只有存在播放队列时快捷提示才显示歌单操作', () => {
+  assert.equal(playbackShortcutText().includes('歌单'), false);
+  assert.match(playbackShortcutText({ hasPlaylist: true }), /p 歌单/);
+  assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Enter 播放/);
+  assert.equal(playbackShortcutText({ hasPlaylist: false, playlistOpen: true }).includes('歌单'), false);
 });
 
 test('播放时钟支持暂停、继续和前后跳转并限制边界', () => {
@@ -90,6 +150,19 @@ test('歌词视窗只显示当前行和未来行且不超过容量', () => {
   assert.equal(viewport.filter((line) => line.played && !line.current).length, 0);
   assert.equal(viewport[0].text, 'line-3');
   assert.equal(lyricViewport(lines, 3500, 1)[0].text, 'line-3');
+});
+
+test('歌单视窗保持选择项可见并分别标记选择与正在播放', () => {
+  const tracks = Array.from({ length: 10 }, (_, index) => ({ name: `song-${index}` }));
+  const viewport = playlistViewport(tracks, 8, 2, 4);
+  assert.equal(viewport.start, 6);
+  assert.deepEqual(viewport.rows.map((row) => row.index), [6, 7, 8, 9]);
+  assert.equal(viewport.rows.find((row) => row.selected)?.index, 8);
+  assert.equal(viewport.rows.some((row) => row.current), false);
+
+  const withCurrent = playlistViewport(tracks, 2, 2, 5);
+  assert.equal(withCurrent.rows.find((row) => row.selected)?.current, true);
+  assert.deepEqual(playlistViewport([], 0, 0, 3), { start: 0, selectedIndex: -1, rows: [] });
 });
 
 test('翻译仅按相同时间戳附加并去除与原文相同的内容', () => {

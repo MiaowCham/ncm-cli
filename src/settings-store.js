@@ -36,7 +36,7 @@ export async function saveSettings(settings, file = settingsFilePath()) {
   const next = { ...current, ...settings };
   if (!QUALITY_LEVELS.includes(next.quality)) throw new Error(`不支持的音质等级：${next.quality}`);
   if (!validLyricOffset(next.lyricOffsetMs)) {
-    throw new Error(`歌词偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒`);
+    throw new Error(`播放时间偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒`);
   }
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   await writeFile(file, `${JSON.stringify({ ...next, updatedAt: new Date().toISOString() }, null, 2)}\n`, {

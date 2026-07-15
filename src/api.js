@@ -9,6 +9,35 @@ function cookieFromHeaders(headers) {
   return values.map((item) => item.split(';')[0]).filter(Boolean).join('; ');
 }
 
+function normalizePlaylist(raw = {}) {
+  const creator = raw.creator || {};
+  return {
+    id: String(raw.id),
+    name: raw.name || '未命名歌单',
+    cover: raw.coverImgUrl || raw.picUrl || null,
+    description: raw.description || '',
+    creator: {
+      id: creator.userId == null ? null : String(creator.userId),
+      nickname: creator.nickname || '未知用户',
+      avatar: creator.avatarUrl || null
+    },
+    trackCount: Number(raw.trackCount) || 0,
+    playCount: Number(raw.playCount) || 0,
+    subscribedCount: Number(raw.subscribedCount ?? raw.bookCount) || 0,
+    shareCount: Number(raw.shareCount) || 0,
+    commentCount: Number(raw.commentCount) || 0,
+    createTime: Number(raw.createTime) || 0,
+    updateTime: Number(raw.updateTime) || 0,
+    specialType: Number(raw.specialType) || 0,
+    subscribed: Boolean(raw.subscribed),
+    tracks: Array.isArray(raw.tracks) ? raw.tracks.map(normalizeSong) : []
+  };
+}
+
+function isLikedPlaylist(playlist) {
+  return playlist.specialType === 5 || /喜欢的音乐\s*$/.test(playlist.name);
+}
+
 export class NcmApi {
   constructor({ baseUrl = process.env.NCM_API_BASE_URL || DEFAULT_BASE_URL, cookie = null, logger = null, quality = 'standard' } = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -87,6 +116,77 @@ export class NcmApi {
     const raw = data.songs?.[0];
     if (!raw) throw new Error(`没有找到歌曲 ID ${id}`);
     return normalizeSong(raw);
+  }
+
+  async userPlaylists(uid, options = {}) {
+    const {
+      pageSize: requestedPageSize = 1000,
+      maxPlaylists: requestedMaxPlaylists = 10000,
+      ...requestOptions
+    } = options;
+    const pageSize = Math.max(1, Math.min(1000, Math.trunc(Number(requestedPageSize)) || 1000));
+    const maxPlaylists = Math.max(1, Math.min(10000, Math.trunc(Number(requestedMaxPlaylists)) || 10000));
+    const playlists = [];
+    const seenIds = new Set();
+    let offset = 0;
+
+    while (offset < maxPlaylists) {
+      const limit = Math.min(pageSize, maxPlaylists - offset);
+      const { data } = await this.request('/user/playlist', { uid, limit, offset }, requestOptions);
+      const page = Array.isArray(data.playlist) ? data.playlist : [];
+      let added = 0;
+      for (const raw of page) {
+        const playlist = normalizePlaylist(raw);
+        if (seenIds.has(playlist.id)) continue;
+        seenIds.add(playlist.id);
+        playlists.push(playlist);
+        added += 1;
+        if (playlists.length >= maxPlaylists) break;
+      }
+      if (!page.length || added === 0 || playlists.length >= maxPlaylists || data.more === false) break;
+      if (data.more !== true && page.length < limit) break;
+      offset += page.length;
+    }
+
+    return [
+      ...playlists.filter(isLikedPlaylist),
+      ...playlists.filter((playlist) => !isLikedPlaylist(playlist))
+    ];
+  }
+
+  async playlistDetail(id, options = {}) {
+    const { data } = await this.request('/playlist/detail', { id }, options);
+    if (!data.playlist) throw new Error(`没有找到歌单 ID ${id}`);
+    return normalizePlaylist(data.playlist);
+  }
+
+  async playlistTracks(id, options = {}) {
+    const {
+      pageSize: requestedPageSize = 500,
+      maxTracks: requestedMaxTracks = 10000,
+      ...requestOptions
+    } = options;
+    const pageSize = Math.max(1, Math.min(1000, Math.trunc(Number(requestedPageSize)) || 500));
+    const maxTracks = Math.max(1, Math.min(10000, Math.trunc(Number(requestedMaxTracks)) || 10000));
+    const tracks = [];
+    const seenIds = new Set();
+
+    for (let offset = 0; offset < maxTracks; offset += pageSize) {
+      const limit = Math.min(pageSize, maxTracks - offset);
+      const { data } = await this.request('/playlist/track/all', { id, limit, offset }, requestOptions);
+      const page = Array.isArray(data.songs) ? data.songs : [];
+      let added = 0;
+      for (const raw of page) {
+        const song = normalizeSong(raw);
+        if (seenIds.has(song.id)) continue;
+        seenIds.add(song.id);
+        tracks.push(song);
+        added += 1;
+        if (tracks.length >= maxTracks) break;
+      }
+      if (page.length < limit || added === 0 || tracks.length >= maxTracks) break;
+    }
+    return tracks;
   }
 
   async lyrics(id, options = {}) {

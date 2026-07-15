@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection,
-  parseOffsetCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand
+  parseListPlaylistsCommand, parseOffsetCommand, parsePlaylistCommand, parseQualityCommand,
+  parseSignoutCommand, parseClearCommand
 } from '../src/parsers.js';
 
 test('识别所有约定的 ID 点歌语法', () => {
@@ -32,6 +33,16 @@ test('识别清屏命令', () => {
   assert.equal(parseClearCommand('clear'), false);
 });
 
+test('识别歌单命令', () => {
+  assert.equal(parseListPlaylistsCommand('/lspl'), true);
+  assert.equal(parseListPlaylistsCommand(' /LSPL '), true);
+  assert.equal(parseListPlaylistsCommand('/lspl 1'), false);
+  assert.equal(parsePlaylistCommand('/pl 123456'), '123456');
+  assert.equal(parsePlaylistCommand(' /PL 123456 '), '123456');
+  assert.equal(parsePlaylistCommand('/pl'), null);
+  assert.equal(parsePlaylistCommand('/pl abc'), null);
+});
+
 test('识别音质命令', () => {
   assert.deepEqual(parseQualityCommand('/quality'), { level: null });
   assert.deepEqual(parseQualityCommand('/QUALITY LossLess'), { level: 'lossless' });
@@ -45,7 +56,7 @@ test('识别歌词偏移命令并报告非法参数', () => {
   assert.deepEqual(parseOffsetCommand('/offset -750'), { milliseconds: -750 });
   assert.deepEqual(parseOffsetCommand('/offset 1.5'), {
     milliseconds: null,
-    error: '歌词偏移量必须是整数毫秒'
+    error: '播放时间偏移量必须是整数毫秒'
   });
   assert.equal(parseOffsetCommand('offset 2000'), null);
 });

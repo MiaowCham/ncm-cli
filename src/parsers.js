@@ -20,6 +20,15 @@ export function parseClearCommand(input) {
   return /^\/clear$/i.test(input.trim());
 }
 
+export function parseListPlaylistsCommand(input) {
+  return /^\/lspl$/i.test(input.trim());
+}
+
+export function parsePlaylistCommand(input) {
+  const match = input.trim().match(/^\/pl\s+(\d+)\s*$/i);
+  return match ? match[1] : null;
+}
+
 export const QUALITY_LEVELS = Object.freeze([
   'standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'dolby', 'jymaster'
 ]);
@@ -36,7 +45,7 @@ export function parseOffsetCommand(input) {
   const argument = match[1]?.trim();
   if (!argument) return { milliseconds: null };
   if (!/^[+-]?\d+$/.test(argument)) {
-    return { milliseconds: null, error: '歌词偏移量必须是整数毫秒' };
+    return { milliseconds: null, error: '播放时间偏移量必须是整数毫秒' };
   }
   return { milliseconds: Number(argument) };
 }

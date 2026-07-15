@@ -15,7 +15,9 @@ const CONTROL_ACTIONS = new Set([
   'seek_absolute',
   'seek_relative',
   'fast_forward',
-  'rewind'
+  'rewind',
+  'previous',
+  'next'
 ]);
 
 function log(logger, level, event, data = {}) {
@@ -27,6 +29,7 @@ function noOpBridge(sessionId = '') {
     available: false,
     sessionId,
     setMetadata: async () => false,
+    updateControls: () => false,
     updatePlayback: () => false,
     close: async () => {}
   };
@@ -116,6 +119,10 @@ export async function createSmtcBridge({
   readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
   closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS,
   maxLineBytes = DEFAULT_MAX_LINE_BYTES,
+  playlistControls,
+  hasPlaylist,
+  canPrevious,
+  canNext,
   sessionId = randomUUID()
 } = {}) {
   if (platform !== 'win32') return noOpBridge(sessionId);
@@ -160,6 +167,12 @@ export async function createSmtcBridge({
       markUnavailable('stdin_write_failed', error);
       return false;
     }
+  };
+
+  const playlistEnabled = Boolean(playlistControls ?? hasPlaylist);
+  let currentControls = {
+    previous: typeof canPrevious === 'boolean' ? canPrevious : playlistEnabled,
+    next: typeof canNext === 'boolean' ? canNext : playlistEnabled
   };
 
   let resolveReady;
@@ -249,7 +262,10 @@ export async function createSmtcBridge({
 
   write({
     type: 'initialize',
-    controls: { play: true, pause: true, stop: true, seek: true, rewind: true, fastForward: true }
+    controls: {
+      play: true, pause: true, stop: true, seek: true, rewind: true, fastForward: true,
+      ...currentControls
+    }
   }, false);
 
   const startupTimer = setTimeout(() => finishStartup(false), readyTimeoutMs);
@@ -263,6 +279,7 @@ export async function createSmtcBridge({
   }
 
   let currentMetadata = metadataFrom(song, durationMs, coverPath);
+  write({ type: 'controls', ...currentControls });
   write({ type: 'metadata', ...currentMetadata });
 
   return {
@@ -271,6 +288,18 @@ export async function createSmtcBridge({
     async setMetadata(overrides = {}) {
       currentMetadata = metadataFrom(currentMetadata, durationMs, coverPath, overrides);
       return write({ type: 'metadata', ...currentMetadata });
+    },
+    updateControls(options = {}) {
+      const fallback = options.playlistControls ?? options.hasPlaylist;
+      currentControls = {
+        previous: typeof options.canPrevious === 'boolean'
+          ? options.canPrevious
+          : fallback === undefined ? currentControls.previous : Boolean(fallback),
+        next: typeof options.canNext === 'boolean'
+          ? options.canNext
+          : fallback === undefined ? currentControls.next : Boolean(fallback)
+      };
+      return write({ type: 'controls', ...currentControls });
     },
     updatePlayback({ status, positionMs = 0, durationMs: nextDuration = currentMetadata.durationMs, rate = 1 } = {}) {
       if (!['playing', 'paused', 'stopped'].includes(status)) return false;

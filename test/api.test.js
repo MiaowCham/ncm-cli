@@ -168,3 +168,116 @@ test('外部 AbortSignal 可以取消进行中的 API 请求', async () => {
     await once(server, 'close');
   }
 });
+
+test('用户歌单标准化，并将喜欢的音乐稳定置顶', async () => {
+  let requestUrl;
+  const server = http.createServer((request, response) => {
+    requestUrl = request.url;
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ playlist: [
+      { id: 1, name: '普通一', creator: { userId: 7, nickname: '用户' }, trackCount: 2 },
+      { id: 2, name: '测试喜欢的音乐', specialType: 0, coverImgUrl: 'https://img.test/2.jpg' },
+      { id: 3, name: '普通二' },
+      { id: 4, name: '收藏', specialType: 5 }
+    ] }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const playlists = await api.userPlaylists('7');
+    assert.deepEqual(playlists.map((playlist) => playlist.id), ['2', '4', '1', '3']);
+    assert.equal(playlists[0].cover, 'https://img.test/2.jpg');
+    assert.deepEqual(playlists[2].creator, { id: '7', nickname: '用户', avatar: null });
+    assert.match(requestUrl, /(?:\?|&)uid=7(?:&|$)/);
+    assert.match(requestUrl, /(?:\?|&)limit=1000(?:&|$)/);
+    assert.match(requestUrl, /(?:\?|&)offset=0(?:&|$)/);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('用户歌单按 more 分页，并在重复页停止', async () => {
+  const offsets = [];
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    assert.equal(url.pathname, '/user/playlist');
+    assert.equal(url.searchParams.get('uid'), '7');
+    assert.equal(url.searchParams.get('limit'), '2');
+    const offset = Number(url.searchParams.get('offset'));
+    offsets.push(offset);
+    const pages = {
+      0: [{ id: 1, name: '普通一' }, { id: 2, name: '普通二' }],
+      2: [{ id: 3, name: '用户喜欢的音乐' }, { id: 4, name: '普通三' }],
+      4: [{ id: 3, name: '用户喜欢的音乐' }, { id: 4, name: '普通三' }]
+    };
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ playlist: pages[offset] || [], more: true }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const playlists = await api.userPlaylists('7', { pageSize: 2 });
+    assert.deepEqual(offsets, [0, 2, 4]);
+    assert.deepEqual(playlists.map((playlist) => playlist.id), ['3', '1', '2', '4']);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('歌单详情标准化元数据和预览歌曲', async () => {
+  let requestUrl;
+  const server = http.createServer((request, response) => {
+    requestUrl = request.url;
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ playlist: {
+      id: 88, name: '测试歌单', coverImgUrl: 'https://img.test/cover.jpg', description: '说明',
+      creator: { userId: 9, nickname: '创建者' }, trackCount: 1, playCount: 12,
+      tracks: [{ id: 10, name: '歌曲', ar: [{ name: '歌手' }], al: { name: '专辑' }, dt: 1000 }]
+    } }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const playlist = await api.playlistDetail('88');
+    assert.equal(playlist.id, '88');
+    assert.equal(playlist.playCount, 12);
+    assert.deepEqual(playlist.tracks.map((song) => song.id), ['10']);
+    assert.match(requestUrl, /^\/playlist\/detail\?/);
+    assert.match(requestUrl, /(?:\?|&)id=88(?:&|$)/);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('完整歌单歌曲分页获取，并在重复页停止', async () => {
+  const offsets = [];
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    assert.equal(url.pathname, '/playlist/track/all');
+    assert.equal(url.searchParams.get('id'), '88');
+    offsets.push(Number(url.searchParams.get('offset')));
+    const offset = Number(url.searchParams.get('offset'));
+    const ids = offset === 0 ? [1, 2] : [2, 3];
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ songs: ids.map((id) => ({
+      id, name: `歌曲${id}`, ar: [{ name: '歌手' }], al: { name: '专辑' }, dt: 1000
+    })) }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const songs = await api.playlistTracks('88', { pageSize: 2, maxTracks: 10 });
+    assert.deepEqual(songs.map((song) => song.id), ['1', '2', '3']);
+    assert.deepEqual(offsets, [0, 2, 4]);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});

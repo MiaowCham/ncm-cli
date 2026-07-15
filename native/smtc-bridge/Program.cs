@@ -72,6 +72,10 @@ while (!shouldExit && await Console.In.ReadLineAsync() is { } line)
                 bridge.UpdatePlayback(command);
                 Protocol.Write(new { type = "ack", command = commandType });
                 break;
+            case "controls":
+                bridge.UpdateControls(command);
+                Protocol.Write(new { type = "ack", command = commandType });
+                break;
             case "shutdown":
                 Protocol.Write(new { type = "ack", command = commandType });
                 shouldExit = true;
@@ -101,6 +105,8 @@ static void RunSelfTest()
 
     if (Protocol.MapButton(Windows.Media.SystemMediaTransportControlsButton.Play) != "play" ||
         Protocol.MapButton(Windows.Media.SystemMediaTransportControlsButton.FastForward) != "fast_forward" ||
+        Protocol.MapButton(Windows.Media.SystemMediaTransportControlsButton.Previous) != "previous" ||
+        Protocol.MapButton(Windows.Media.SystemMediaTransportControlsButton.Next) != "next" ||
         Protocol.MapButton(Windows.Media.SystemMediaTransportControlsButton.Record) is not null)
     {
         failures.Add("button mapping");
