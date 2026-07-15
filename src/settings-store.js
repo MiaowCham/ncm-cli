@@ -7,11 +7,18 @@ import { normalizeApiBaseUrl } from './api.js';
 export const DEFAULT_QUALITY = 'standard';
 export const DEFAULT_LYRIC_OFFSET_MS = 2000;
 export const DEFAULT_SMTC_OFFSET_MS = 0;
+export const DEFAULT_SEARCH_LIMIT = 30;
+export const MIN_SEARCH_LIMIT = 1;
+export const MAX_SEARCH_LIMIT = 100;
 export const MIN_LYRIC_OFFSET_MS = -60000;
 export const MAX_LYRIC_OFFSET_MS = 60000;
 
 function validLyricOffset(value) {
   return Number.isInteger(value) && value >= MIN_LYRIC_OFFSET_MS && value <= MAX_LYRIC_OFFSET_MS;
+}
+
+function validSearchLimit(value) {
+  return Number.isInteger(value) && value >= MIN_SEARCH_LIMIT && value <= MAX_SEARCH_LIMIT;
 }
 
 export function settingsFilePath(env = process.env, platform = process.platform) {
@@ -31,6 +38,7 @@ export async function loadSettings(file = settingsFilePath()) {
       quality: QUALITY_LEVELS.includes(data.quality) ? data.quality : DEFAULT_QUALITY,
       lyricOffsetMs: validLyricOffset(data.lyricOffsetMs) ? data.lyricOffsetMs : DEFAULT_LYRIC_OFFSET_MS,
       smtcOffsetMs: validLyricOffset(data.smtcOffsetMs) ? data.smtcOffsetMs : DEFAULT_SMTC_OFFSET_MS,
+      searchLimit: validSearchLimit(data.searchLimit) ? data.searchLimit : DEFAULT_SEARCH_LIMIT,
       apiBaseUrl
     };
   } catch (error) {
@@ -39,6 +47,7 @@ export async function loadSettings(file = settingsFilePath()) {
         quality: DEFAULT_QUALITY,
         lyricOffsetMs: DEFAULT_LYRIC_OFFSET_MS,
         smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS,
+        searchLimit: DEFAULT_SEARCH_LIMIT,
         apiBaseUrl: null
       };
     }
@@ -55,6 +64,9 @@ export async function saveSettings(settings, file = settingsFilePath()) {
   }
   if (!validLyricOffset(next.smtcOffsetMs)) {
     throw new Error(`SMTC 额外偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒`);
+  }
+  if (!validSearchLimit(next.searchLimit)) {
+    throw new Error(`搜索返回数量必须是 ${MIN_SEARCH_LIMIT} 到 ${MAX_SEARCH_LIMIT} 之间的整数`);
   }
   if (next.apiBaseUrl != null) next.apiBaseUrl = normalizeApiBaseUrl(next.apiBaseUrl);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
