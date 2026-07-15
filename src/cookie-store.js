@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { normalizeCookie } from './parsers.js';
@@ -42,4 +42,14 @@ export async function saveCookie(cookie, file = configFilePath()) {
     // Windows 的 ACL 不完全映射 POSIX mode；写入时仍请求最小权限。
   }
   return file;
+}
+
+export async function clearCookie(file = configFilePath()) {
+  try {
+    await unlink(file);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
 }

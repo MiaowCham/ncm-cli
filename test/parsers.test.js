@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand, parseLyricAction,
-  parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection
+  parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection,
+  parseQualityCommand, parseSignoutCommand
 } from '../src/parsers.js';
 
 test('识别所有约定的 ID 点歌语法', () => {
@@ -16,6 +17,19 @@ test('识别登录命令及 Cookie', () => {
   assert.deepEqual(parseLoginCommand('/login'), { action: 'qr', cookie: null });
   assert.deepEqual(parseLoginCommand('/login status'), { action: 'status', cookie: null });
   assert.deepEqual(parseLoginCommand('/login MUSIC_U=abc; __csrf=def'), { action: 'cookie', cookie: 'MUSIC_U=abc; __csrf=def' });
+});
+
+test('识别登出命令', () => {
+  assert.equal(parseSignoutCommand('/signout'), true);
+  assert.equal(parseSignoutCommand(' /SIGNOUT '), true);
+  assert.equal(parseSignoutCommand('/signout now'), false);
+});
+
+test('识别音质命令', () => {
+  assert.deepEqual(parseQualityCommand('/quality'), { level: null });
+  assert.deepEqual(parseQualityCommand('/QUALITY LossLess'), { level: 'lossless' });
+  assert.deepEqual(parseQualityCommand('/quality invalid value'), { level: 'invalid value' });
+  assert.equal(parseQualityCommand('quality lossless'), null);
 });
 
 test('识别歌词输出语法', () => {

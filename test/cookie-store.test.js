@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { loadCookie, saveCookie } from '../src/cookie-store.js';
+import { clearCookie, loadCookie, saveCookie } from '../src/cookie-store.js';
 
 test('Cookie 可以缓存并重新加载', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ncm-cli-test-'));
@@ -38,6 +38,19 @@ test('语义无效的 Cookie 缓存降级为未登录', async () => {
   try {
     await writeFile(file, JSON.stringify({ cookie: 'not-a-cookie' }));
     assert.equal(await loadCookie(file), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('清除 Cookie 幂等且会删除缓存文件', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'ncm-cli-test-'));
+  const file = path.join(directory, 'cookie.json');
+  try {
+    await saveCookie('MUSIC_U=secret', file);
+    assert.equal(await clearCookie(file), true);
+    assert.equal(await loadCookie(file), null);
+    assert.equal(await clearCookie(file), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

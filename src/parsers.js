@@ -12,6 +12,20 @@ export function parseLoginCommand(input) {
   return { action: 'cookie', cookie: argument };
 }
 
+export function parseSignoutCommand(input) {
+  return /^\/signout$/i.test(input.trim());
+}
+
+export const QUALITY_LEVELS = Object.freeze([
+  'standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'dolby', 'jymaster'
+]);
+
+export function parseQualityCommand(input) {
+  const match = input.trim().match(/^\/quality(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  return { level: match[1]?.trim().toLowerCase() || null };
+}
+
 export function parseLyricAction(input) {
   const match = input.trim().match(/^\/?(?:l|lyric|歌词)(?:\s*(?:>|\|)\s*(.+))?$/i);
   if (!match) return null;

@@ -85,6 +85,28 @@ test('播放接口无 URL 时保留诊断 code', async () => {
   }
 });
 
+test('新版播放接口使用当前音质等级', async () => {
+  let requestUrl;
+  const server = http.createServer((request, response) => {
+    requestUrl = request.url;
+    response.setHeader('content-type', 'application/json');
+    response.end('{"data":[{"id":1,"code":200,"url":"https://example.test/song.flac"}]}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}`, quality: 'lossless' });
+    await api.songUrl('1');
+    assert.match(requestUrl, /(?:\?|&)level=lossless(?:&|$)/);
+    api.setQuality('hires');
+    await api.songUrl('2');
+    assert.match(requestUrl, /(?:\?|&)level=hires(?:&|$)/);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
 test('登录状态同时校验 account 和 profile', async () => {
   const server = http.createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
@@ -97,6 +119,28 @@ test('登录状态同时校验 account 和 profile', async () => {
     const status = await api.loginStatus();
     assert.equal(status.loggedIn, true);
     assert.equal(status.profile.nickname, 'tester');
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('用户等级与登出接口返回结构化结果', async () => {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url);
+    response.setHeader('content-type', 'application/json');
+    response.end(request.url.startsWith('/user/level')
+      ? '{"code":200,"data":{"level":9,"listenSongs":1234}}'
+      : '{"code":200}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    assert.deepEqual(await api.userLevel(), { level: 9, listenSongs: 1234 });
+    assert.deepEqual(await api.logout(), { code: 200 });
+    assert.equal(requests.length, 2);
   } finally {
     server.close();
     await once(server, 'close');

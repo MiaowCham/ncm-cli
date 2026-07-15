@@ -5,15 +5,21 @@ import path from 'node:path';
 import chalk from 'chalk';
 import qrcode from 'qrcode-terminal';
 import { NcmApi } from './api.js';
-import { loadCookie, saveCookie } from './cookie-store.js';
+import { clearCookie, loadCookie, saveCookie } from './cookie-store.js';
 import { mergeTranslatedLrc, plainLyrics } from './lyrics.js';
 import { Logger } from './logger.js';
 import { playWithProgress, tryRenderImage } from './media.js';
+import { loadSettings, saveSettings } from './settings-store.js';
 import {
   normalizeCookie, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
-  parseNumberSelection
+  parseNumberSelection, parseQualityCommand, parseSignoutCommand, QUALITY_LEVELS
 } from './parsers.js';
+
+const QUALITY_LABELS = Object.freeze({
+  standard: '标准', higher: '较高', exhigh: '极高', lossless: '无损', hires: 'Hi-Res',
+  jyeffect: '高清环绕声', sky: '沉浸环绕声', dolby: '杜比全景声', jymaster: '超清母带'
+});
 
 function isAbortError(error) {
   return error?.name === 'AbortError' || ['ABORT_ERR', 'ERR_USE_AFTER_CLOSE'].includes(error?.code);
@@ -34,12 +40,16 @@ ${chalk.bold('命令')}
   /login                                  扫码登录
   /login <cookie>                         保存并使用已有 Cookie
   /login status                           查看服务端验证的登录状态
+  /signout                                退出登录并清除本地 Cookie
+  /quality                                查看并选择播放音质
+  /quality <level>                        直接设置播放音质
   /help                                   显示帮助
   /quit                                   退出程序
 
-歌词命令、搜索结果和格式选项均支持 ${chalk.cyan('> 文件名.lrc')}。
-歌曲详情：p 播放，l 歌词，u 播放链接，q 返回。
-播放页：q 停止返回，空格暂停/继续，←/→ 后退/前进 5 秒。
+歌词命令、搜索结果和格式选项均支持 ${chalk.cyan('> 文件名.lrc')} 或 ${chalk.cyan('| 文件名.lrc')}。
+音质 level：${QUALITY_LEVELS.join('、')}。
+歌曲详情：p 播放，l 歌词（支持 l > 文件 或 l | 文件），u 播放链接，q 返回。
+播放页：q 停止返回，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，t 开关翻译。
 `);
 }
 
@@ -80,25 +90,109 @@ async function showSong(song, signal) {
 
 async function refreshAuthState(api, authState, signal, logger) {
   if (!api.cookie) {
-    Object.assign(authState, { loggedIn: false, verified: true, nickname: null });
+    Object.assign(authState, { loggedIn: false, verified: true, account: null, profile: null, level: null });
     return authState;
   }
   try {
     const status = await api.loginStatus({ signal, timeoutMs: 8000 });
-    Object.assign(authState, { loggedIn: status.loggedIn, verified: true, nickname: status.profile?.nickname || null });
+    Object.assign(authState, {
+      loggedIn: status.loggedIn,
+      verified: true,
+      account: status.account,
+      profile: status.profile,
+      level: null
+    });
+    if (status.loggedIn) {
+      try {
+        authState.level = await api.userLevel({ signal, timeoutMs: 8000 });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        void logger.warn('user_level_failed', { error });
+      }
+    }
     void logger.info('login_status', { loggedIn: authState.loggedIn });
   } catch (error) {
     if (isAbortError(error)) throw error;
-    Object.assign(authState, { loggedIn: false, verified: false, nickname: null });
+    Object.assign(authState, { loggedIn: false, verified: false, account: null, profile: null, level: null });
     void logger.warn('login_status_failed', { error });
   }
   return authState;
 }
 
-function printLoginStatus(authState) {
-  if (authState.loggedIn) console.log(`已登录${authState.nickname ? `：${authState.nickname}` : ''}`);
+function printLoginStatus(authState, { detailed = false } = {}) {
+  const { account, profile, level } = authState;
+  if (authState.loggedIn) {
+    console.log(`已登录${profile?.nickname ? `：${profile.nickname}` : ''}`);
+    if (!detailed) return;
+    const vipType = profile?.vipType ?? account?.vipType;
+    const fields = [
+      ['昵称', profile?.nickname],
+      ['用户 ID', profile?.userId],
+      ['账号 ID', account?.id],
+      ['等级', level?.level == null ? null : `Lv.${level.level}`],
+      ['会员', vipType == null ? null : (Number(vipType) === 0 ? '非会员' : `类型 ${vipType}`)],
+      ['累计听歌', level?.listenSongs],
+      ['关注', profile?.follows],
+      ['粉丝', profile?.followeds],
+      ['歌单', profile?.playlistCount]
+    ];
+    for (const [label, value] of fields) {
+      if (value !== null && value !== undefined && value !== '') console.log(`${label}：${value}`);
+    }
+  }
   else if (!authState.verified) console.log('存在缓存 Cookie，但暂时无法向服务端验证登录状态。');
   else console.log('未登录，或缓存 Cookie 已失效。');
+}
+
+async function handleSignout(api, authState, signal, logger) {
+  let remoteError = null;
+  let removed = false;
+  try {
+    if (api.cookie) {
+      try {
+        await api.logout({ signal, timeoutMs: 8000 });
+      } catch (error) {
+        remoteError = error;
+        void logger.warn('logout_api_failed', { error });
+      }
+    }
+  } finally {
+    api.setCookie(null);
+    Object.assign(authState, { loggedIn: false, verified: true, account: null, profile: null, level: null });
+    removed = await clearCookie();
+  }
+  void logger.info('signout', { cacheRemoved: removed, remoteSucceeded: !remoteError });
+  if (remoteError) console.log('服务端登出请求失败，但本地 Cookie 已清除。');
+  else console.log(removed ? '已退出登录并清除本地 Cookie。' : '当前未保存登录信息。');
+}
+
+async function setQuality(api, level, logger) {
+  if (!QUALITY_LEVELS.includes(level)) {
+    console.log(`不支持的音质等级：${level}\n可用值：${QUALITY_LEVELS.join('、')}`);
+    return false;
+  }
+  await saveSettings({ quality: level });
+  api.setQuality(level);
+  void logger.info('quality_changed', { quality: level });
+  console.log(`播放音质已设置为：${QUALITY_LABELS[level]}（${level}）`);
+  return true;
+}
+
+async function handleQuality(rl, api, command, signal, logger) {
+  if (command.level) {
+    await setQuality(api, command.level, logger);
+    return;
+  }
+  console.log(`当前播放音质：${QUALITY_LABELS[api.quality] || api.quality}（${api.quality}）`);
+  QUALITY_LEVELS.forEach((level, index) => {
+    console.log(`${String(index + 1).padStart(2)}. ${QUALITY_LABELS[level]}（${level}）`);
+  });
+  while (true) {
+    const raw = (await ask(rl, '选择序号或 level，q 返回：', signal)).trim().toLowerCase();
+    if (/^q$/i.test(raw)) return;
+    const level = /^\d+$/.test(raw) ? QUALITY_LEVELS[Number(raw) - 1] : raw;
+    if (level && await setQuality(api, level, logger)) return;
+  }
 }
 
 async function handleLogin(rl, api, authState, signal, logger) {
@@ -226,7 +320,7 @@ async function lyricFormatMenu(rl, api, song, { outputFile = null, signal } = {}
   4. 原文 + 翻译（all）
   q. 返回`);
   while (true) {
-    const raw = (await ask(rl, '选择格式，可追加 > 文件：', signal)).trim();
+    const raw = (await ask(rl, '选择格式，可追加 > 文件 或 | 文件：', signal)).trim();
     const selection = parseLyricFormatSelection(raw);
     if (!selection) {
       console.log('无效格式，请输入 1-4、plain/lrc/trans/all 或 q。');
@@ -255,7 +349,7 @@ async function songMenu(rl, api, song, context) {
   await showSong(song, signal);
   let cachedLyrics = null;
   while (true) {
-    const action = (await ask(rl, chalk.yellow('\n[p]播放 [l]歌词 [u]播放链接 [q]返回 > '), signal)).trim();
+    const action = (await ask(rl, chalk.yellow('\n[p]播放 [l]歌词（可追加 > 文件 或 | 文件） [u]播放链接 [q]返回 > '), signal)).trim();
     if (/^(?:q|b|back|返回)$/i.test(action)) return;
     const lyricAction = parseLyricAction(action);
     if (lyricAction) {
@@ -280,6 +374,7 @@ async function songMenu(rl, api, song, context) {
         url: result.url,
         durationMs: song.durationMs,
         lyricSource: cachedLyrics.original,
+        translatedLyricSource: cachedLyrics.translated,
         signal,
         logger,
         rl,
@@ -326,7 +421,7 @@ async function lyricSearchFlow(rl, api, command, context) {
     songs.forEach((song, index) => {
       if (song.lyricMatches?.length) console.log(chalk.gray(`    ${index + 1}: ${song.lyricMatches.slice(0, 2).join(' / ')}`));
     });
-    const raw = (await ask(rl, '选择序号（可追加 > 文件），q 返回搜索：', context.signal)).trim();
+    const raw = (await ask(rl, '选择序号（可追加 > 文件 或 | 文件），q 返回搜索：', context.signal)).trim();
     const selection = parseNumberSelection(raw);
     if (!selection) {
       console.log('无效序号。');
@@ -353,11 +448,20 @@ async function lyricSearchFlow(rl, api, command, context) {
 
 async function resolveInput(rl, api, raw, context) {
   const { authState, signal, logger } = context;
+  const quality = parseQualityCommand(raw);
+  if (quality) {
+    await handleQuality(rl, api, quality, signal, logger);
+    return;
+  }
+  if (parseSignoutCommand(raw)) {
+    await handleSignout(api, authState, signal, logger);
+    return;
+  }
   const login = parseLoginCommand(raw);
   if (login) {
     if (login.action === 'status') {
       await refreshAuthState(api, authState, signal, logger);
-      printLoginStatus(authState);
+      printLoginStatus(authState, { detailed: true });
     } else if (login.action === 'cookie') await useProvidedCookie(api, authState, login.cookie, signal, logger);
     else await handleLogin(rl, api, authState, signal, logger);
     return;
@@ -414,8 +518,9 @@ export async function main(args = []) {
 
   try {
     const cookie = await loadCookie();
-    const api = new NcmApi({ cookie, logger });
-    void logger.info('startup', { cookiePresent: Boolean(cookie) });
+    const settings = await loadSettings();
+    const api = new NcmApi({ cookie, logger, quality: settings.quality });
+    void logger.info('startup', { cookiePresent: Boolean(cookie), quality: settings.quality });
 
     if (/^(?:lyrc|lyric|lyrics)$/i.test(args[0] || '') && /^\d+$/.test(args[1] || '')) {
       const lyrics = await api.lyrics(args[1], { signal: controller.signal });
@@ -425,7 +530,7 @@ export async function main(args = []) {
 
     rl = createInterface({ input, output });
     rl.on('SIGINT', onSigint);
-    const authState = { loggedIn: false, verified: false, nickname: null };
+    const authState = { loggedIn: false, verified: false, account: null, profile: null, level: null };
     await refreshAuthState(api, authState, controller.signal, logger);
 
     console.log(chalk.bold.cyan('NCM CLI 点歌台'));
