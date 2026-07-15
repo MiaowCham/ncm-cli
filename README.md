@@ -4,7 +4,7 @@
 
 ## 安装与运行
 
-要求 Node.js 22+，播放功能还需安装以下任一播放器并加入 `PATH`：`ffplay`、`mpv`、`vlc`。
+要求 Node.js 22+，播放功能还需安装以下任一播放器并加入 `PATH`：`mpv`、`ffplay`、`vlc`。推荐安装 `mpv`：程序会通过 JSON IPC 复用常驻播放器，暂停、跳转、音量调整和切歌无需重启进程；未安装或无法初始化 mpv 时会自动回退到 ffplay/VLC 的兼容模式。
 
 Windows 下会在 `npm install` 时尝试使用 .NET 8 SDK 构建 SMTC helper；未安装 SDK 时不会阻止安装或普通播放，但 SMTC 不可用。安装 SDK 后可随时执行 `npm run build:smtc`。如需生成不依赖目标机 .NET Runtime 的 helper，可在构建前设置 `NCM_SMTC_SELF_CONTAINED=1`。
 
