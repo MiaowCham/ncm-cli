@@ -248,7 +248,26 @@ export function wrapTerminalText(text, width) {
 }
 
 export function playbackShortcutRows(options = {}, width = 80) {
-  return wrapTerminalText(playbackShortcutText(options), width);
+  const safeWidth = Math.max(1, Math.floor(Number(width) || 1));
+  const segments = playbackShortcutText(options).split(/\s{2,}/).filter(Boolean);
+  const rows = [];
+  let row = '';
+  for (const segment of segments) {
+    if (stringWidth(segment) > safeWidth) {
+      if (row) rows.push(row);
+      rows.push(...wrapTerminalText(segment, safeWidth));
+      row = '';
+      continue;
+    }
+    const candidate = row ? `${row}  ${segment}` : segment;
+    if (stringWidth(candidate) <= safeWidth) row = candidate;
+    else {
+      if (row) rows.push(row);
+      row = segment;
+    }
+  }
+  if (row || !rows.length) rows.push(row);
+  return rows;
 }
 
 /** SMTC 使用物理歌曲时长；offset 只修正对外报告的位置。 */

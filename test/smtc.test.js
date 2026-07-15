@@ -112,6 +112,13 @@ test('分片 ready 后发送隔离会话的元数据且仅接受 HTTPS 封面', 
   assert.equal(JSON.stringify(metadata).includes('audio.mp3'), false);
   assert.equal(await bridge.setMetadata({ coverUri: 'http://insecure.test/a.jpg' }), true);
   assert.equal('coverUri' in child.message(3), false);
+  assert.equal(await bridge.setMetadata({
+    id: '2', name: '第二首', artists: ['新歌手'], album: '新专辑', durationMs: 18000
+  }), true);
+  assert.deepEqual(
+    (({ trackId, title, artist, album, durationMs }) => ({ trackId, title, artist, album, durationMs }))(child.message(4)),
+    { trackId: '2', title: '第二首', artist: '新歌手', album: '新专辑', durationMs: 18000 }
+  );
   await bridge.close();
 });
 

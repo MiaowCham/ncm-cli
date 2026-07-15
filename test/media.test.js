@@ -134,9 +134,11 @@ test('只有存在播放队列时快捷提示才显示歌单操作', () => {
 test('窄窗口中的快捷键提示按显示宽度换行而不是省略', () => {
   const source = playbackShortcutText({ hasPlaylist: true });
   const rows = playbackShortcutRows({ hasPlaylist: true }, 24);
+  const segments = source.split(/\s{2,}/);
   assert.ok(rows.length > 1);
   assert.ok(rows.every((row) => stringWidth(row) <= 24));
   assert.equal(rows.join('').replaceAll(' ', ''), source.replaceAll(' ', ''));
+  assert.ok(segments.every((segment) => stringWidth(segment) > 24 || rows.some((row) => row.includes(segment))));
   assert.deepEqual(wrapTerminalText('中文abc', 4), ['中文', 'abc']);
 });
 
