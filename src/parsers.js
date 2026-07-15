@@ -46,7 +46,7 @@ export function splitOutputRedirect(input) {
 
 export function parseLyricDirectCommand(input) {
   const { command, output } = splitOutputRedirect(input.trim());
-  const match = command.match(/^\/lyrc\s+(\d+)(?:\s+(plain|lrc|trans|all))?$/i);
+  const match = command.match(/^\/idlyric\s+(\d+)(?:\s+(plain|lrc|trans|all))?$/i);
   if (!match) return null;
   return { id: match[1], format: match[2]?.toLowerCase() || 'plain', output };
 }

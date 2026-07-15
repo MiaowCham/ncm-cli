@@ -42,9 +42,9 @@ id 347230
 歌词命令分为两种：
 
 ```text
-/lyrc 347230                         ID 直出，默认纯歌词
-/lyrc 347230 lrc                     输出原始 LRC
-/lyrc 347230 all > lyrics.lrc        合并原文/翻译并写入文件
+/idlyric <id>                         ID 直出，默认纯歌词
+/idlyric <id> lrc                     输出原始 LRC
+/idlyric <id> all > lyrics.lrc        合并原文/翻译并写入文件
 
 /lyric 风雨里追赶                    按歌词内容搜索，再选择歌曲和格式
 /lyric 风雨里追赶 trans              选择歌曲后直接输出翻译 LRC
