@@ -11,6 +11,42 @@ import { createSmtcBridge } from './smtc.js';
 let cachedWindowsTerminalVersion;
 let retainedSmtcBridge = null;
 
+export function createLatestDebounce(callback, delayMs = 80) {
+  let timer = null;
+  let pendingValue;
+  return {
+    schedule(value) {
+      pendingValue = value;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        callback(pendingValue);
+      }, Math.max(0, Number(delayMs) || 0));
+    },
+    cancel() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    }
+  };
+}
+
+export function waitWithSignal(promise, signal) {
+  if (!signal) return Promise.resolve(promise);
+  if (signal.aborted) return Promise.reject(signal.reason || new DOMException('操作已取消', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    const abort = () => {
+      cleanup();
+      reject(signal.reason || new DOMException('操作已取消', 'AbortError'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); }
+    );
+  });
+}
+
 /** 关闭单曲自然结束后为系统媒体面板保留的最后一个 SMTC 会话。 */
 export async function closeRetainedSmtc() {
   const bridge = retainedSmtcBridge;
@@ -381,6 +417,11 @@ async function waitForExit(child, timeoutMs = 1500) {
 async function terminatePlayer(child) {
   if (!child || child.exitCode !== null) return;
   if (process.platform === 'win32' && child.pid) {
+    // 大多数播放器可由 TerminateProcess 立即结束；先走快速路径，避免每次按键
+    // 都等待额外 taskkill 进程启动。仅在播放器仍未退出时清理进程树。
+    try { child.kill(); } catch {}
+    await waitForExit(child, 75);
+    if (child.exitCode !== null) return;
     const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     await once(killer, 'exit').catch(() => {});
     if (child.exitCode === null) child.kill();
@@ -467,7 +508,7 @@ function renderDynamic({
   const indicatorRows = indicator
     ? [chalk.yellow(truncateText(indicator, columns))]
     : playbackShortcutRows({ playlistOpen, hasPlaylist: Boolean(playlist?.tracks?.length) }, columns)
-      .map((row) => chalk.cyan(row));
+      .map((row) => chalk.cyanBright(row));
   // 进度、可变行数快捷键提示和其后空行共同占用播放区。
   const chromeRows = 1 + Math.min(indicatorRows.length, Math.max(0, availableRows - 1))
     + (availableRows > 1 + indicatorRows.length ? 1 : 0);
@@ -483,7 +524,7 @@ function renderDynamic({
       return item.current ? chalk.whiteBright.bold(text) : chalk.gray(text);
     });
     contentRows = lyricCapacity > 0
-      ? [chalk.cyan.bold(title), ...(trackRows.length ? trackRows : [chalk.gray('歌单为空')])].slice(0, lyricCapacity)
+      ? [chalk.cyanBright.bold(title), ...(trackRows.length ? trackRows : [chalk.gray('歌单为空')])].slice(0, lyricCapacity)
       : [];
   } else {
     const displayRows = playbackLyricRows(lyrics, lyricElapsedMs, lyricCapacity, showTranslation);
@@ -687,6 +728,7 @@ export async function playWithProgress({
   let activeOffsetMs = adjustPlaybackOffset(lyricOffsetMs, 0);
   const activeSmtcOffsetMs = Number.isFinite(Number(smtcOffsetMs)) ? Number(smtcOffsetMs) : 0;
   let volume = 100;
+  let userPaused = false;
   let hasTranslation = lyrics.some((line) => Boolean(line.translation));
   let showTranslation = hasTranslation;
   let indicator = '';
@@ -700,8 +742,14 @@ export async function playWithProgress({
   let playlistSelection = playlistCurrentIndex >= 0 ? playlistCurrentIndex : 0;
   let child = null;
   let finished = false;
+  let closing = false;
+  let trackTransitioning = false;
+  let trackTransitionController = null;
+  const transitionCancelled = Symbol('transition_cancelled');
   let refreshTimer = null;
   let smtcTimer = null;
+  let restartTargetMs = null;
+  let restartGeneration = 0;
   let dynamicRow = 1;
   let dynamicAnchored = false;
   let headerRendering = false;
@@ -764,13 +812,17 @@ export async function playWithProgress({
     await terminatePlayer(instance);
   };
 
-  const restartAt = async (positionMs) => {
-    const wasPaused = clock.paused;
-    if (!wasPaused) clock.pause();
+  const restartAt = async (positionMs, generation) => {
+    if (generation !== restartGeneration) return;
+    if (!clock.paused) clock.pause();
     await stopCurrent();
-    clock.seekTo(positionMs);
-    if (!wasPaused) {
-      spawnAt(positionMs);
+    if (generation !== restartGeneration) return;
+    const finalPosition = restartTargetMs ?? positionMs;
+    restartTargetMs = null;
+    restartDebounce.cancel();
+    clock.seekTo(finalPosition);
+    if (!userPaused) {
+      spawnAt(finalPosition);
       clock.resume();
     }
   };
@@ -788,7 +840,7 @@ export async function playWithProgress({
       elapsedMs,
       lyricElapsedMs,
       durationMs: displayDurationMs,
-      paused: clock.paused,
+      paused: userPaused,
       lyrics,
       dynamicRow,
       dynamicAnchored,
@@ -799,7 +851,7 @@ export async function playWithProgress({
       playlistSelection
     });
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
-    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, clock.paused, activeOffsetMs), indicatorDelay));
+    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, userPaused, activeOffsetMs), indicatorDelay));
   };
 
   const setIndicator = (text) => {
@@ -815,16 +867,49 @@ export async function playWithProgress({
         rejectCompletion(error);
       }
     });
+    return operationQueue;
   };
 
-  const finish = (reason) => enqueue(async () => {
-    if (finished) return;
-    finished = true;
-    if (refreshTimer) clearTimeout(refreshTimer);
-    await stopCurrent();
-    updateSmtc('stopped');
-    resolveCompletion(reason);
+  const restartDebounce = createLatestDebounce(({ positionMs, generation }) => {
+    const target = restartTargetMs ?? positionMs;
+    restartTargetMs = null;
+    enqueue(() => generation === restartGeneration ? restartAt(target, generation) : undefined);
   });
+  const invalidateRestart = () => {
+    restartGeneration += 1;
+    restartDebounce.cancel();
+    restartTargetMs = null;
+  };
+  const scheduleRestart = (positionMs) => {
+    restartTargetMs = positionMs;
+    restartDebounce.schedule({ positionMs, generation: restartGeneration });
+  };
+
+  let offsetPersistence = Promise.resolve();
+  const persistOffset = (value) => {
+    offsetPersistence = offsetPersistence
+      .then(() => onOffsetChange?.(value))
+      .catch((error) => { void logger?.warn('playback_offset_save_failed', { error }); });
+  };
+
+  const cancelTrackTransition = (reason = '切歌操作已取消') => {
+    trackTransitionController?.abort(new DOMException(reason, 'AbortError'));
+  };
+
+  const finish = (reason) => {
+    if (closing) return;
+    closing = true;
+    invalidateRestart();
+    cancelTrackTransition('播放已退出');
+    enqueue(async () => {
+      if (finished) return;
+      finished = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      await stopCurrent();
+      updateSmtc('stopped');
+      resolveCompletion(reason);
+    });
+  };
 
   const drawHeader = async () => {
     if (!tty) return;
@@ -866,7 +951,13 @@ export async function playWithProgress({
   };
 
   const transitionTo = async (targetIndex, cause = 'manual') => {
+    if (closing) return transitionCancelled;
     if (!playlistTracks.length || targetIndex < 0 || targetIndex >= playlistTracks.length) return false;
+    invalidateRestart();
+    trackTransitioning = true;
+    const transitionController = new AbortController();
+    trackTransitionController = transitionController;
+    try {
     const sameTrack = targetIndex === playlistCurrentIndex;
     if (!sameTrack && typeof onTrackChange !== 'function') {
       // 兼容旧调用方：没有加载回调时仍返回原有的切歌结果。
@@ -880,7 +971,7 @@ export async function playWithProgress({
     }
 
     const oldPosition = clock.position();
-    const wasPlaying = Boolean(child && !clock.paused);
+    const wasPlaying = Boolean(child && !userPaused);
     setIndicator(`正在切换到 ${targetIndex + 1}/${playlistTracks.length}`);
     render();
     if (wasPlaying) clock.pause();
@@ -896,19 +987,25 @@ export async function playWithProgress({
     } : null;
     if (!sameTrack) {
       try {
-        next = await onTrackChange(targetIndex, cause);
+        next = await waitWithSignal(
+          onTrackChange(targetIndex, cause, transitionController.signal),
+          transitionController.signal
+        );
       } catch (error) {
+        if (closing || error?.name === 'AbortError') return transitionCancelled;
         void logger?.warn('playlist_track_change_failed', { targetIndex, error });
         setIndicator('切歌失败，已保留当前歌曲');
-        if (wasPlaying) {
+        if (!closing && cause !== 'natural' && !userPaused) {
           spawnAt(oldPosition);
           clock.resume();
         }
         return false;
       }
+      invalidateRestart();
+      if (closing) return transitionCancelled;
       if (!next?.url || !next?.song) {
         setIndicator('目标歌曲暂时无法播放');
-        if (wasPlaying) {
+        if (cause !== 'natural' && !userPaused) {
           spawnAt(oldPosition);
           clock.resume();
         }
@@ -941,29 +1038,46 @@ export async function playWithProgress({
       cover: activeSong.cover ?? null,
       coverUri: activeSong.cover ?? null
     });
+    invalidateRestart();
+    if (closing) return transitionCancelled;
     updateSmtcControls();
-    spawnAt(0);
-    clock.resume();
+    if (!userPaused) {
+      spawnAt(0);
+      clock.resume();
+    } else {
+      updateSmtc('paused', 0);
+    }
     // 新音频先开始播放；封面在可取消的后台任务中绘制，
     // 不占用按键和 SMTC 共用的串行控制队列。
     void drawHeader().catch((error) => {
       if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
     });
-    setIndicator(`正在播放 ${resolvedIndex + 1}/${playlistTracks.length}`);
+    setIndicator(userPaused
+      ? `已暂停 ${resolvedIndex + 1}/${playlistTracks.length}`
+      : `正在播放 ${resolvedIndex + 1}/${playlistTracks.length}`);
     return true;
+    } finally {
+      if (trackTransitionController === transitionController) trackTransitionController = null;
+      trackTransitioning = false;
+    }
   };
 
   const handleNaturalEnd = async () => {
     clock.pause();
+    userPaused = true;
     clock.seekTo(activeDurationMs);
     updateSmtc('stopped', activeDurationMs);
     if (playlistTracks.length && playlistCurrentIndex < playlistTracks.length - 1) {
       // 自然连播时跳过临时不可用的歌曲，直到找到下一首可播放曲目。
+      userPaused = false;
       for (let targetIndex = playlistCurrentIndex + 1; targetIndex < playlistTracks.length; targetIndex += 1) {
-        if (await transitionTo(targetIndex, 'natural')) return;
+        const result = await transitionTo(targetIndex, 'natural');
+        if (result === true || result === transitionCancelled) return;
         if (finished) return;
+        if (userPaused) break;
       }
     }
+    userPaused = true;
     sessionEnded = true;
     updateSmtcControls();
     if (playlistTracks.length) {
@@ -989,12 +1103,17 @@ export async function playWithProgress({
       finish(action.action === 'stop' ? 'smtc_stop' : 'quit');
       return;
     }
+    if (closing) return;
     if (action.type === 'playlist_previous' || action.type === 'playlist_next'
         || action.action === 'previous' || action.action === 'next') {
       if (playlistTracks.length) {
         const type = action.action === 'previous' ? 'playlist_previous'
           : action.action === 'next' ? 'playlist_next' : action.type;
         const delta = type === 'playlist_previous' ? -1 : 1;
+        const immediateTarget = playlistCurrentIndex + delta;
+        if (immediateTarget < 0 || immediateTarget >= playlistTracks.length) return;
+        cancelTrackTransition('切歌目标已更新');
+        invalidateRestart();
         enqueue(() => {
           const targetIndex = playlistCurrentIndex + delta;
           if (targetIndex < 0 || targetIndex >= playlistTracks.length) return false;
@@ -1026,92 +1145,109 @@ export async function playWithProgress({
     }
     if (action.type === 'playlist_select') {
       if (playlistOpen && Number.isInteger(action.index) && action.index >= 0 && action.index < playlistTracks.length) {
+        cancelTrackTransition('切歌目标已更新');
+        invalidateRestart();
         enqueue(() => transitionTo(action.index, 'select'));
       }
       return;
     }
     if (action.type === 'toggle_pause' || action.action === 'play' || action.action === 'pause') {
-      enqueue(async () => {
-        if (sessionEnded && (action.action === 'play' || action.type === 'toggle_pause')) {
+      if (sessionEnded && (action.action === 'play' || action.type === 'toggle_pause')) {
+        enqueue(async () => {
+          if (closing) return;
+          userPaused = false;
           clock.seekTo(0);
           spawnAt(0);
           clock.resume();
           setIndicator('重新播放');
-          return;
+        });
+        return;
+      }
+      const shouldPlay = action.action === 'play' || (action.type === 'toggle_pause' && userPaused);
+      const shouldPause = action.action === 'pause' || (action.type === 'toggle_pause' && !userPaused);
+      if (shouldPause && !userPaused) {
+        userPaused = true;
+        invalidateRestart();
+        if (!clock.paused) clock.pause();
+        updateSmtc('paused');
+        setIndicator('已暂停');
+        render();
+        if (!trackTransitioning) enqueue(() => stopCurrent());
+      } else if (shouldPlay && userPaused) {
+        userPaused = false;
+        if (trackTransitioning) {
+          setIndicator('切歌后继续播放');
+          render();
+        } else {
+          enqueue(async () => {
+            if (closing) return;
+            const resumeAt = clock.position();
+            spawnAt(resumeAt);
+            clock.resume();
+            setIndicator('继续播放');
+          });
         }
-        const shouldPlay = action.action === 'play' || (action.type === 'toggle_pause' && clock.paused);
-        const shouldPause = action.action === 'pause' || (action.type === 'toggle_pause' && !clock.paused);
-        if (shouldPlay && clock.paused) {
-          const resumeAt = clock.position();
-          spawnAt(resumeAt);
-          clock.resume();
-          setIndicator('继续播放');
-        } else if (shouldPause && !clock.paused) {
-          clock.pause();
-          await stopCurrent();
-          updateSmtc('paused');
-          setIndicator('已暂停');
-        }
-      });
+      }
       return;
     }
     if (action.type === 'seek' || action.action === 'fast_forward' || action.action === 'rewind' || action.action === 'seek_absolute' || action.action === 'seek_relative') {
-      enqueue(async () => {
-        const deltaMs = action.action === 'fast_forward' ? 5000 : action.action === 'rewind' ? -5000 : action.deltaMs;
-        const seekTo = action.action === 'seek_absolute'
-          ? clock.seekTo(rawPosition(action.positionMs, activeOffsetMs + activeSmtcOffsetMs, activeDurationMs))
-          : clock.seek(deltaMs);
-        if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, activeOffsetMs))}`);
-        else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
-        if (!clock.paused) {
-          await restartAt(seekTo);
-        } else {
-          updateSmtc('paused', seekTo);
-        }
-      });
+      if (trackTransitioning) {
+        setIndicator('正在切歌，暂不支持跳转');
+        render();
+        return;
+      }
+      const deltaMs = action.action === 'fast_forward' ? 5000 : action.action === 'rewind' ? -5000 : action.deltaMs;
+      const seekTo = action.action === 'seek_absolute'
+        ? clock.seekTo(rawPosition(action.positionMs, activeOffsetMs + activeSmtcOffsetMs, activeDurationMs))
+        : clock.seek(deltaMs);
+      if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, activeOffsetMs))}`);
+      else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
+      render();
+      if (!userPaused) scheduleRestart(seekTo);
+      else updateSmtc('paused', seekTo);
       return;
     }
     if (action.type === 'volume') {
-      enqueue(async () => {
-        volume = clamp(volume + action.delta, 0, 100);
-        setIndicator(`音量 ${volume}%`);
-        if (!clock.paused) {
-          const position = clock.position();
-          await restartAt(position);
-        }
-      });
+      volume = clamp(volume + action.delta, 0, 100);
+      setIndicator(`音量 ${volume}%`);
+      render();
+      if (!userPaused && !trackTransitioning) scheduleRestart(clock.position());
       return;
     }
     if (action.type === 'offset') {
-      enqueue(async () => {
-        const nextOffsetMs = adjustPlaybackOffset(activeOffsetMs, action.deltaMs);
-        if (nextOffsetMs !== activeOffsetMs) {
-          await onOffsetChange?.(nextOffsetMs);
-          activeOffsetMs = nextOffsetMs;
-        }
-        setIndicator(`播放时间偏移 ${activeOffsetMs} ms`);
-        updateSmtc(clock.paused ? 'paused' : 'playing');
-      });
+      const nextOffsetMs = adjustPlaybackOffset(activeOffsetMs, action.deltaMs);
+      if (nextOffsetMs !== activeOffsetMs) {
+        activeOffsetMs = nextOffsetMs;
+        persistOffset(nextOffsetMs);
+      }
+      setIndicator(`播放时间偏移 ${activeOffsetMs} ms`);
+      updateSmtc(userPaused ? 'paused' : 'playing');
+      render();
       return;
     }
     if (action.type === 'toggle_translation') {
-      enqueue(async () => {
-        const next = toggleTranslationState(showTranslation, hasTranslation);
-        showTranslation = next.showTranslation;
-        setIndicator(next.indicator);
-      });
+      const next = toggleTranslationState(showTranslation, hasTranslation);
+      showTranslation = next.showTranslation;
+      setIndicator(next.indicator);
+      render();
     }
   };
 
   const handleData = (buffer) => dispatchPlaybackAction(playbackAction(buffer, { playlistOpen, playlistSelection }));
 
-  const abort = () => enqueue(async () => {
-    if (finished) return;
-    finished = true;
-    if (refreshTimer) clearTimeout(refreshTimer);
-    await stopCurrent();
-    rejectCompletion(signal.reason || new DOMException('操作已取消', 'AbortError'));
-  });
+  const abort = () => {
+    if (closing) return;
+    closing = true;
+    invalidateRestart();
+    cancelTrackTransition('播放已中断');
+    enqueue(async () => {
+      if (finished) return;
+      finished = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      await stopCurrent();
+      rejectCompletion(signal.reason || new DOMException('操作已取消', 'AbortError'));
+    });
+  };
 
   let restoreInput = () => {};
   const resize = () => render();
@@ -1129,7 +1265,7 @@ export async function playWithProgress({
       clock.resume();
       smtcTimer = setInterval(() => {
         if (!finished) {
-          updateSmtc(sessionEnded ? 'stopped' : clock.paused ? 'paused' : 'playing');
+          updateSmtc(sessionEnded ? 'stopped' : userPaused ? 'paused' : 'playing');
         }
       }, 1000);
       render();
@@ -1139,10 +1275,12 @@ export async function playWithProgress({
     finished = true;
     if (refreshTimer) clearTimeout(refreshTimer);
     if (smtcTimer) clearInterval(smtcTimer);
+    invalidateRestart();
     headerAbortController?.abort();
     signal?.removeEventListener('abort', abort);
     process.stdout.removeListener('resize', resize);
     try {
+      await offsetPersistence;
       await stopCurrent();
       if (!retainSmtc) {
         updateSmtc('stopped');
