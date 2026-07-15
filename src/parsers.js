@@ -18,6 +18,49 @@ export function parseLyricAction(input) {
   return { output: match[1]?.trim() || null };
 }
 
+const LYRIC_FORMATS = new Set(['plain', 'lrc', 'trans', 'all']);
+
+export function splitOutputRedirect(input) {
+  const match = input.match(/^(.*?)\s+(?:>|\|)\s*(.+)$/);
+  if (!match) return { command: input.trim(), output: null };
+  return { command: match[1].trim(), output: match[2].trim() || null };
+}
+
+export function parseLyricDirectCommand(input) {
+  const { command, output } = splitOutputRedirect(input.trim());
+  const match = command.match(/^\/lyrc\s+(\d+)(?:\s+(plain|lrc|trans|all))?$/i);
+  if (!match) return null;
+  return { id: match[1], format: match[2]?.toLowerCase() || 'plain', output };
+}
+
+export function parseLyricSearchCommand(input) {
+  const { command, output } = splitOutputRedirect(input.trim());
+  const match = command.match(/^\/lyrics?\s+(.+)$/i);
+  if (!match) return null;
+  const tokens = match[1].trim().split(/\s+/);
+  let format = null;
+  const candidate = tokens.at(-1)?.toLowerCase();
+  if (tokens.length > 1 && LYRIC_FORMATS.has(candidate)) format = tokens.pop().toLowerCase();
+  const query = tokens.join(' ').trim();
+  return query ? { query, format, output } : null;
+}
+
+export function parseNumberSelection(input) {
+  const { command, output } = splitOutputRedirect(input.trim());
+  if (/^q$/i.test(command)) return { quit: true, index: null, output };
+  if (!/^\d+$/.test(command)) return null;
+  return { quit: false, index: Number(command) - 1, output };
+}
+
+export function parseLyricFormatSelection(input) {
+  const { command, output } = splitOutputRedirect(input.trim());
+  if (/^q$/i.test(command)) return { quit: true, format: null, output };
+  const formats = { '1': 'plain', '2': 'lrc', '3': 'trans', '4': 'all' };
+  const format = formats[command] || command.toLowerCase();
+  if (!LYRIC_FORMATS.has(format)) return null;
+  return { quit: false, format, output };
+}
+
 export function normalizeCookie(raw) {
   let value = raw.trim();
   if ((value.startsWith('"') && value.endsWith('"')) ||
