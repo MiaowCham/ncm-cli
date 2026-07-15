@@ -33,7 +33,7 @@ API 地址默认为 `https://ncmapi.miaowcham.com`，可通过 `NCM_API_BASE_URL
 id:347230
 ID=347230
 id 347230
-/id 347230
+/id <id>
 /clear
 /lyrics 风雨里追赶
 歌词:风雨里追赶
