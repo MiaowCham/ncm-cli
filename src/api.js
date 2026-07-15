@@ -115,12 +115,12 @@ export class NcmApi {
     }
   }
 
-  async search(keywords, limit = 10, options = {}) {
+  async search(keywords, limit = 30, options = {}) {
     const { data } = await this.request('/cloudsearch', { keywords, limit, type: 1 }, options);
     return (data.result?.songs || []).map(normalizeSong);
   }
 
-  async searchLyrics(keywords, limit = 10, options = {}) {
+  async searchLyrics(keywords, limit = 30, options = {}) {
     const { data } = await this.request('/cloudsearch', { keywords, limit, type: 1006 }, options);
     return (data.result?.songs || []).map((raw) => ({
       ...normalizeSong(raw),

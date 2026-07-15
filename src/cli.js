@@ -884,7 +884,7 @@ async function chooseSong(rl, api, songs, context) {
 }
 
 async function lyricSearchFlow(rl, api, command, context) {
-  const songs = await api.searchLyrics(command.query, 10, { signal: context.signal });
+  const songs = await api.searchLyrics(command.query, context.settings.searchLimit, { signal: context.signal });
   if (!songs.length) {
     console.log('没有找到歌词命中结果。');
     return;
@@ -992,7 +992,7 @@ async function resolveInput(rl, api, raw, context) {
     printHelp();
     return;
   }
-  const songs = await api.search(raw, 10, { signal });
+  const songs = await api.search(raw, context.settings.searchLimit, { signal });
   if (!songs.length) {
     console.log('没有找到歌曲。');
     return;
@@ -1039,7 +1039,7 @@ export async function main(args = []) {
     });
     void logger.info('startup', {
       cookiePresent: Boolean(cookie), quality: settings.quality, lyricOffsetMs: settings.lyricOffsetMs,
-      smtcOffsetMs: settings.smtcOffsetMs,
+      smtcOffsetMs: settings.smtcOffsetMs, searchLimit: settings.searchLimit,
       baseUrl: api.baseUrl, apiFromEnvironment: apiConfiguration.fromEnvironment
     });
 

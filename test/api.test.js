@@ -65,7 +65,12 @@ test('API 地址的路径前缀会保留在请求中', async () => {
 });
 
 test('歌词搜索兼容字符串命中片段并移除 HTML', async () => {
+  let receivedLimit;
+  let receivedType;
   const server = http.createServer((request, response) => {
+    const query = new URL(request.url, 'http://localhost').searchParams;
+    receivedLimit = query.get('limit');
+    receivedType = query.get('type');
     response.setHeader('content-type', 'application/json');
     response.end(JSON.stringify({ result: { songs: [{
       id: 1, name: '测试歌', ar: [{ name: '歌手' }], al: { name: '专辑' }, dt: 1000,
@@ -78,6 +83,28 @@ test('歌词搜索兼容字符串命中片段并移除 HTML', async () => {
     const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
     const songs = await api.searchLyrics('风雨里追赶');
     assert.deepEqual(songs[0].lyricMatches, ['风雨里追赶 雾里分不清影踪']);
+    assert.equal(receivedLimit, '30');
+    assert.equal(receivedType, '1006');
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('歌曲搜索默认请求 30 条结果', async () => {
+  let query;
+  const server = http.createServer((request, response) => {
+    query = new URL(request.url, 'http://localhost').searchParams;
+    response.setHeader('content-type', 'application/json');
+    response.end('{"result":{"songs":[]}}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    await api.search('测试');
+    assert.equal(query.get('limit'), '30');
+    assert.equal(query.get('type'), '1');
   } finally {
     server.close();
     await once(server, 'close');

@@ -60,9 +60,11 @@ test('普通搜索的歌曲详情退出后直接回到主页', { timeout: 15000 
     al: { name: '测试专辑', picUrl: null },
     dt: 1000
   };
+  let receivedLimit;
   const server = http.createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
     if (request.url.startsWith('/cloudsearch')) {
+      receivedLimit = new URL(request.url, 'http://localhost').searchParams.get('limit');
       response.end(JSON.stringify({ result: { songs: [rawSong] } }));
     } else if (request.url.startsWith('/song/detail')) {
       response.end(JSON.stringify({ songs: [rawSong] }));
@@ -75,13 +77,14 @@ test('普通搜索的歌曲详情退出后直接回到主页', { timeout: 15000 
   await once(server, 'listening');
   try {
     const baseUrl = `http://127.0.0.1:${server.address().port}`;
-    await saveSettings({ apiBaseUrl: baseUrl }, path.join(directory, 'settings.json'));
+    await saveSettings({ apiBaseUrl: baseUrl, searchLimit: 17 }, path.join(directory, 'settings.json'));
     const result = await runCli(['测试'], {
       env: { NCM_CLI_CONFIG_DIR: directory, NCM_API_BASE_URL: '' }
     });
     assert.equal(result.code, 0, result.stderr);
     assert.doesNotMatch(result.stdout, /无效序号/);
     assert.match(result.stdout, /搜索歌曲、输入 ID 点歌/);
+    assert.equal(receivedLimit, '17');
   } finally {
     server.close();
     await once(server, 'close');
