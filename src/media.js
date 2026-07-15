@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import stringWidth from 'string-width';
 import supportsTerminalGraphics from 'supports-terminal-graphics';
 import { parseLrc } from './lyrics.js';
+import { createMpvController } from './mpv-controller.js';
 import { createSmtcBridge } from './smtc.js';
 import { hasProcessExited } from './process-state.js';
 
@@ -110,8 +111,8 @@ export function imageProtocolOrder({ nativeGraphics = false, sixel = false, chaf
   return order;
 }
 
-export function findPlayer() {
-  const candidates = ['ffplay', 'mpv', 'vlc', 'cvlc'].map((command) => ({
+export function findPlayer(commands = ['mpv', 'ffplay', 'vlc', 'cvlc']) {
+  const candidates = commands.map((command) => ({
     command,
     args: (url, seconds, volume) => playerArguments(command, url, seconds, volume)
   }));
@@ -717,7 +718,7 @@ export async function playWithProgress({
   onTrackChange
 }) {
   await closeRetainedSmtc();
-  const player = findPlayer();
+  let player = findPlayer();
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
   let activeSong = song;
@@ -743,6 +744,8 @@ export async function playWithProgress({
   let playlistOpen = false;
   let playlistSelection = playlistCurrentIndex >= 0 ? playlistCurrentIndex : 0;
   let child = null;
+  let mpvController = null;
+  let mpvLoaded = false;
   let finished = false;
   let closing = false;
   let trackTransitioning = false;
@@ -788,7 +791,16 @@ export async function playWithProgress({
     return smtc.updatePlayback({ status, ...timeline });
   };
 
-  const spawnAt = (positionMs) => {
+  const spawnAt = async (positionMs) => {
+    if (mpvController) {
+      await mpvController.load(activeUrl, { positionMs, volume });
+      await mpvController.resume();
+      mpvLoaded = true;
+      sessionEnded = false;
+      updateSmtc('playing', positionMs);
+      void logger?.info('player_load', { player: 'mpv', positionMs });
+      return;
+    }
     const instance = spawn(player.command, player.args(activeUrl, positionMs / 1000, volume), { stdio: 'ignore', windowsHide: true });
     child = instance;
     sessionEnded = false;
@@ -801,12 +813,18 @@ export async function playWithProgress({
       void logger?.info('player_exit', { player: player.command, code, signal: exitSignal });
       if (!finished && child === instance && !intentionalStops.has(instance)) {
         child = null;
-        enqueue(() => handleNaturalEnd());
+        if (code === 0 && !exitSignal) enqueue(() => handleNaturalEnd());
+        else rejectCompletion(new Error(`${player.command} 异常退出（code=${code}, signal=${exitSignal || 'none'}）`));
       }
     });
   };
 
   const stopCurrent = async () => {
+    if (mpvController) {
+      if (mpvLoaded && mpvController.available) await mpvController.stop();
+      mpvLoaded = false;
+      return;
+    }
     const instance = child;
     child = null;
     if (hasProcessExited(instance)) return;
@@ -824,7 +842,7 @@ export async function playWithProgress({
     restartDebounce.cancel();
     clock.seekTo(finalPosition);
     if (!userPaused) {
-      spawnAt(finalPosition);
+      await spawnAt(finalPosition);
       clock.resume();
     }
   };
@@ -998,7 +1016,7 @@ export async function playWithProgress({
         void logger?.warn('playlist_track_change_failed', { targetIndex, error });
         setIndicator('切歌失败，已保留当前歌曲');
         if (!closing && cause !== 'natural' && !userPaused) {
-          spawnAt(oldPosition);
+          await spawnAt(oldPosition);
           clock.resume();
         }
         return false;
@@ -1008,7 +1026,7 @@ export async function playWithProgress({
       if (!next?.url || !next?.song) {
         setIndicator('目标歌曲暂时无法播放');
         if (cause !== 'natural' && !userPaused) {
-          spawnAt(oldPosition);
+          await spawnAt(oldPosition);
           clock.resume();
         }
         return false;
@@ -1044,7 +1062,7 @@ export async function playWithProgress({
     if (closing) return transitionCancelled;
     updateSmtcControls();
     if (!userPaused) {
-      spawnAt(0);
+      await spawnAt(0);
       clock.resume();
     } else {
       updateSmtc('paused', 0);
@@ -1166,7 +1184,7 @@ export async function playWithProgress({
           if (closing) return;
           userPaused = false;
           clock.seekTo(0);
-          spawnAt(0);
+          await spawnAt(0);
           clock.resume();
           setIndicator('重新播放');
         });
@@ -1181,7 +1199,9 @@ export async function playWithProgress({
         updateSmtc('paused');
         setIndicator('已暂停');
         render();
-        if (!trackTransitioning) enqueue(() => stopCurrent());
+        if (!trackTransitioning) {
+          enqueue(() => mpvController ? mpvController.pause() : stopCurrent());
+        }
       } else if (shouldPlay && userPaused) {
         userPaused = false;
         if (trackTransitioning) {
@@ -1191,7 +1211,8 @@ export async function playWithProgress({
           enqueue(async () => {
             if (closing) return;
             const resumeAt = clock.position();
-            spawnAt(resumeAt);
+            if (mpvController && mpvLoaded) mpvController.resume();
+            else await spawnAt(resumeAt);
             clock.resume();
             setIndicator('继续播放');
           });
@@ -1212,7 +1233,10 @@ export async function playWithProgress({
       if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, activeOffsetMs))}`);
       else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
       render();
-      if (!userPaused) scheduleRestart(seekTo);
+      if (mpvController) {
+        enqueue(() => mpvController.seekAbsolute(seekTo / 1000));
+        updateSmtc(userPaused ? 'paused' : 'playing', seekTo);
+      } else if (!userPaused) scheduleRestart(seekTo);
       else updateSmtc('paused', seekTo);
       return;
     }
@@ -1220,7 +1244,8 @@ export async function playWithProgress({
       volume = clamp(volume + action.delta, 0, 100);
       setIndicator(`音量 ${volume}%`);
       render();
-      if (!userPaused && !trackTransitioning) scheduleRestart(clock.position());
+      if (mpvController) enqueue(() => mpvController.setVolume(volume));
+      else if (!userPaused && !trackTransitioning) scheduleRestart(clock.position());
       return;
     }
     if (action.type === 'offset') {
@@ -1261,6 +1286,28 @@ export async function playWithProgress({
   let restoreInput = () => {};
   const resize = () => render();
   try {
+    if (player.command === 'mpv') {
+      const controller = createMpvController({
+        logger,
+        onEnd: (_event, generation) => {
+          if (!finished && !closing) {
+            enqueue(() => generation === controller.generation ? handleNaturalEnd() : undefined);
+          }
+        },
+        onError: (error) => {
+          if (!finished && !closing) rejectCompletion(error);
+        }
+      });
+      try {
+        await controller.initialize();
+        mpvController = controller;
+      } catch (error) {
+        await controller.close();
+        void logger?.warn('mpv_ipc_unavailable', { error });
+        player = findPlayer(['ffplay', 'vlc', 'cvlc']);
+        if (!player) throw new Error('mpv IPC 初始化失败，且未找到 ffplay 或 VLC 回退播放器。', { cause: error });
+      }
+    }
     if (tty) {
       process.stdout.write(`\x1b[?1049h${playbackTerminalModeSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
       await drawHeader();
@@ -1270,7 +1317,7 @@ export async function playWithProgress({
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     else {
-      spawnAt(clock.position());
+      await spawnAt(clock.position());
       clock.resume();
       smtcTimer = setInterval(() => {
         if (!finished) {
@@ -1291,6 +1338,7 @@ export async function playWithProgress({
     try {
       await offsetPersistence;
       await stopCurrent();
+      await mpvController?.close();
       if (!retainSmtc) {
         updateSmtc('stopped');
         await smtc.close();
