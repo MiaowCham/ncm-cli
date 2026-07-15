@@ -34,7 +34,7 @@ function printHelp() {
   console.log(`
 ${chalk.bold('命令')}
   关键词                                  搜索歌曲
-  /id 347230                              按 ID 点歌（兼容 id:、ID=、id 空格等写法）
+  /id <id>                                按 ID 点歌（兼容 id:、ID=、id 空格等写法）
   /lyrc <id> [plain|lrc|trans|all]        按 ID 直接输出歌词，默认 plain
   /lyric <内容> [plain|lrc|trans|all]     按歌词内容搜索
   /login                                  扫码登录
