@@ -1,7 +1,7 @@
 {
   "name": "ncm-cli-player",
   "version": "1.0.0",
-  "description": "基于 NeteaseCloudMusicApi 的交互式 CLI 点歌工具",
+  "description": "基于 neteasecloudmusicapienhanced/api-enhanced 的交互式 CLI 点歌工具",
   "type": "module",
   "bin": {
     "ncm": "./bin/ncm.js"

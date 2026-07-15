@@ -4,7 +4,7 @@ import {
   normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection,
   parseListPlaylistsCommand, parseOffsetCommand, parsePlaylistCommand, parseQualityCommand,
-  parseSignoutCommand, parseClearCommand
+  parseSignoutCommand, parseClearCommand, parseApiCommand
 } from '../src/parsers.js';
 
 test('识别所有约定的 ID 点歌语法', () => {
@@ -59,6 +59,14 @@ test('识别歌词偏移命令并报告非法参数', () => {
     error: '播放时间偏移量必须是整数毫秒'
   });
   assert.equal(parseOffsetCommand('offset 2000'), null);
+});
+
+test('识别 API 地址命令', () => {
+  assert.deepEqual(parseApiCommand('/api'), { url: null });
+  assert.deepEqual(parseApiCommand('/API https://api.example.com/prefix'), {
+    url: 'https://api.example.com/prefix'
+  });
+  assert.equal(parseApiCommand('api https://api.example.com'), null);
 });
 
 test('识别歌词输出语法', () => {

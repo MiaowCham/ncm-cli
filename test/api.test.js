@@ -2,7 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { NcmApi } from '../src/api.js';
+import { NcmApi, normalizeApiBaseUrl } from '../src/api.js';
+
+test('API 地址必须显式配置并规范化', () => {
+  assert.throws(() => new NcmApi(), /尚未配置 API 地址/);
+  assert.equal(normalizeApiBaseUrl(' https://api.example.com/prefix/// '), 'https://api.example.com/prefix');
+  assert.equal(normalizeApiBaseUrl('http://localhost:3000/'), 'http://localhost:3000');
+  assert.equal(normalizeApiBaseUrl('http://192.168.1.8:3000/api/'), 'http://192.168.1.8:3000/api');
+  assert.equal(normalizeApiBaseUrl('http://api.example.com:3000/'), 'http://api.example.com:3000');
+  assert.throws(() => normalizeApiBaseUrl('ftp://example.com'), /仅支持 http 或 https/);
+  assert.throws(() => normalizeApiBaseUrl('https://user:pass@example.com'), /用户名或密码/);
+  assert.throws(() => normalizeApiBaseUrl('https://example.com/api?q=1'), /查询参数或片段/);
+  assert.throws(() => normalizeApiBaseUrl('https://example.com/api#doc'), /查询参数或片段/);
+});
+
+test('可以在运行时更换 API 地址', () => {
+  const api = new NcmApi({ baseUrl: 'https://one.example.com/' });
+  api.setBaseUrl('https://two.example.com/prefix/');
+  assert.equal(api.baseUrl, 'https://two.example.com/prefix');
+  assert.throws(() => api.setBaseUrl('file:///tmp/api'), /仅支持 http 或 https/);
+});
 
 test('Cookie 只通过 header 发送，不进入 URL', async () => {
   let received;
@@ -19,6 +38,26 @@ test('Cookie 只通过 header 发送，不进入 URL', async () => {
     await api.request('/probe', { query: 'ok' });
     assert.equal(received.cookie, 'MUSIC_U=secret');
     assert.doesNotMatch(received.url, /secret|cookie|MUSIC_U/i);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('API 地址的路径前缀会保留在请求中', async () => {
+  let receivedUrl;
+  const server = http.createServer((request, response) => {
+    receivedUrl = request.url;
+    response.setHeader('content-type', 'application/json');
+    response.end('{"code":200}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const { port } = server.address();
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${port}/api-enhanced` });
+    await api.request('/probe', { query: 'ok' });
+    assert.match(receivedUrl, /^\/api-enhanced\/probe\?/);
   } finally {
     server.close();
     await once(server, 'close');
