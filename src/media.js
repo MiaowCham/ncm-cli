@@ -133,6 +133,7 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
   const key = Buffer.isBuffer(buffer) ? buffer.toString('utf8') : String(buffer);
   if (key.includes('\u0003')) return { type: 'interrupt' };
   if (key.toLowerCase() === 'q') return { type: 'quit' };
+  if (key.toLowerCase() === 'r') return { type: 'refresh' };
   if (key.includes('\u001b[1;5D') || key.includes('\u001b[5D')) return { type: 'playlist_previous' };
   if (key.includes('\u001b[1;5C') || key.includes('\u001b[5C')) return { type: 'playlist_next' };
   // Ctrl+方向键必须先于普通方向键和鼠标序列判断，避免被识别为音量或歌单滚动。
@@ -401,9 +402,9 @@ export function playlistViewport(tracks, selectedIndex, currentIndex, capacity) 
 
 export function playbackShortcutText({ playlistOpen = false, hasPlaylist = false } = {}) {
   if (playlistOpen && hasPlaylist) {
-    return 'p/Esc 关闭歌单  ↑/↓ 选择  Enter 播放  Ctrl+←/→ 上/下一首  Ctrl+↑/↓ 偏移';
+    return 'p/Esc 关闭歌单  ↑/↓ 选择  Enter 播放  Ctrl+←/→ 上/下一首  Ctrl+↑/↓ 偏移  r 刷新';
   }
-  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译';
+  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译  r 刷新';
   return hasPlaylist ? `${base}  p 歌单  Ctrl+←/→ 切歌` : base;
 }
 
@@ -1105,6 +1106,13 @@ export async function playWithProgress({
       return;
     }
     if (closing) return;
+    if (action.type === 'refresh') {
+      setIndicator('页面已刷新');
+      void drawHeader().catch((error) => {
+        if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
+      });
+      return;
+    }
     if (action.type === 'playlist_previous' || action.type === 'playlist_next'
         || action.action === 'previous' || action.action === 'next') {
       if (playlistTracks.length) {

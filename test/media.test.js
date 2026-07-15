@@ -68,8 +68,10 @@ test('播放器偏移参数覆盖 ffplay/mpv/vlc', () => {
   assert.ok(playerArguments('vlc', 'song.mp3', 5, 80).includes('--volume=205'));
 });
 
-test('播放快捷键解析退出、暂停、跳转、音量、翻译与 Ctrl+C', () => {
+test('播放快捷键解析退出、刷新、暂停、跳转、音量、翻译与 Ctrl+C', () => {
   assert.deepEqual(playbackAction('q'), { type: 'quit' });
+  assert.deepEqual(playbackAction('r'), { type: 'refresh' });
+  assert.deepEqual(playbackAction('R'), { type: 'refresh' });
   assert.deepEqual(playbackAction(' '), { type: 'toggle_pause' });
   assert.deepEqual(playbackAction('\u001b[D'), { type: 'seek', deltaMs: -5000 });
   assert.deepEqual(playbackAction('\u001b[C'), { type: 'seek', deltaMs: 5000 });
@@ -129,6 +131,8 @@ test('只有存在播放队列时快捷提示才显示歌单操作', () => {
   assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Enter 播放/);
   assert.equal(playbackShortcutText({ hasPlaylist: false, playlistOpen: true }).includes('歌单'), false);
   assert.match(playbackShortcutText(), /Ctrl\+↑\/↓ 偏移/);
+  assert.match(playbackShortcutText(), /r 刷新/);
+  assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /r 刷新/);
   assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Ctrl\+↑\/↓ 偏移/);
 });
 
