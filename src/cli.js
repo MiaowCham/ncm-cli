@@ -9,11 +9,14 @@ import { clearCookie, loadCookie, saveCookie } from './cookie-store.js';
 import { mergeTranslatedLrc, plainLyrics } from './lyrics.js';
 import { Logger } from './logger.js';
 import { playWithProgress, tryRenderImage } from './media.js';
-import { loadSettings, saveSettings } from './settings-store.js';
+import {
+  loadSettings, saveSettings, MIN_LYRIC_OFFSET_MS, MAX_LYRIC_OFFSET_MS
+} from './settings-store.js';
 import {
   normalizeCookie, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
-  parseNumberSelection, parseQualityCommand, parseSignoutCommand, parseClearCommand, QUALITY_LEVELS
+  parseNumberSelection, parseOffsetCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
+  QUALITY_LEVELS
 } from './parsers.js';
 
 const QUALITY_LABELS = Object.freeze({
@@ -43,6 +46,8 @@ ${chalk.bold('命令')}
   /signout                                退出登录并清除本地 Cookie
   /quality                                查看并选择播放音质
   /quality <level>                        直接设置播放音质
+  /offset                                 查看并设置歌词时间偏移
+  /offset <毫秒>                          直接设置歌词时间偏移（默认 2000）
   /clear                                  清空终端并返回搜索
   /help                                   显示帮助
   /quit                                   退出程序
@@ -167,21 +172,22 @@ async function handleSignout(api, authState, signal, logger) {
   else console.log(removed ? '已退出登录并清除本地 Cookie。' : '当前未保存登录信息。');
 }
 
-async function setQuality(api, level, logger) {
+async function setQuality(api, settings, level, logger) {
   if (!QUALITY_LEVELS.includes(level)) {
     console.log(`不支持的音质等级：${level}\n可用值：${QUALITY_LEVELS.join('、')}`);
     return false;
   }
-  await saveSettings({ quality: level });
+  await saveSettings({ ...settings, quality: level });
+  settings.quality = level;
   api.setQuality(level);
   void logger.info('quality_changed', { quality: level });
   console.log(`播放音质已设置为：${QUALITY_LABELS[level]}（${level}）`);
   return true;
 }
 
-async function handleQuality(rl, api, command, signal, logger) {
+async function handleQuality(rl, api, settings, command, signal, logger) {
   if (command.level) {
-    await setQuality(api, command.level, logger);
+    await setQuality(api, settings, command.level, logger);
     return;
   }
   console.log(`当前播放音质：${QUALITY_LABELS[api.quality] || api.quality}（${api.quality}）`);
@@ -192,7 +198,42 @@ async function handleQuality(rl, api, command, signal, logger) {
     const raw = (await ask(rl, '选择序号或 level，q 返回：', signal)).trim().toLowerCase();
     if (/^q$/i.test(raw)) return;
     const level = /^\d+$/.test(raw) ? QUALITY_LEVELS[Number(raw) - 1] : raw;
-    if (level && await setQuality(api, level, logger)) return;
+    if (level && await setQuality(api, settings, level, logger)) return;
+  }
+}
+
+async function setLyricOffset(settings, milliseconds, logger) {
+  if (!Number.isInteger(milliseconds)
+      || milliseconds < MIN_LYRIC_OFFSET_MS || milliseconds > MAX_LYRIC_OFFSET_MS) {
+    console.log(`歌词偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒。`);
+    return false;
+  }
+  await saveSettings({ ...settings, lyricOffsetMs: milliseconds });
+  settings.lyricOffsetMs = milliseconds;
+  void logger.info('lyric_offset_changed', { lyricOffsetMs: milliseconds });
+  console.log(`歌词时间偏移已设置为：${milliseconds} 毫秒`);
+  return true;
+}
+
+async function handleOffset(rl, settings, command, signal, logger) {
+  if (command.error) {
+    console.log(`${command.error}；允许范围为 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS}。`);
+    return;
+  }
+  if (command.milliseconds !== null) {
+    await setLyricOffset(settings, command.milliseconds, logger);
+    return;
+  }
+  console.log(`当前歌词时间偏移：${settings.lyricOffsetMs} 毫秒`);
+  while (true) {
+    const raw = (await ask(
+      rl,
+      `输入偏移毫秒（${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS}，q 返回）：`,
+      signal
+    )).trim();
+    if (/^q$/i.test(raw)) return;
+    if (/^[+-]?\d+$/.test(raw) && await setLyricOffset(settings, Number(raw), logger)) return;
+    if (!/^[+-]?\d+$/.test(raw)) console.log('歌词偏移量必须是整数毫秒。');
   }
 }
 
@@ -376,6 +417,7 @@ async function songMenu(rl, api, song, context) {
         durationMs: song.durationMs,
         lyricSource: cachedLyrics.original,
         translatedLyricSource: cachedLyrics.translated,
+        lyricOffsetMs: context.settings.lyricOffsetMs,
         signal,
         logger,
         rl,
@@ -453,9 +495,14 @@ async function resolveInput(rl, api, raw, context) {
     output.write('\x1b[2J\x1b[H');
     return;
   }
+  const offset = parseOffsetCommand(raw);
+  if (offset) {
+    await handleOffset(rl, context.settings, offset, signal, logger);
+    return;
+  }
   const quality = parseQualityCommand(raw);
   if (quality) {
-    await handleQuality(rl, api, quality, signal, logger);
+    await handleQuality(rl, api, context.settings, quality, signal, logger);
     return;
   }
   if (parseSignoutCommand(raw)) {
@@ -525,7 +572,9 @@ export async function main(args = []) {
     const cookie = await loadCookie();
     const settings = await loadSettings();
     const api = new NcmApi({ cookie, logger, quality: settings.quality });
-    void logger.info('startup', { cookiePresent: Boolean(cookie), quality: settings.quality });
+    void logger.info('startup', {
+      cookiePresent: Boolean(cookie), quality: settings.quality, lyricOffsetMs: settings.lyricOffsetMs
+    });
 
     if (/^idlyric$/i.test(args[0] || '') && /^\d+$/.test(args[1] || '')) {
       const lyrics = await api.lyrics(args[1], { signal: controller.signal });
@@ -544,7 +593,7 @@ export async function main(args = []) {
     console.log(`日志：${logger.file}`);
     console.log('输入 /help 查看命令。');
 
-    const context = { authState, signal: controller.signal, logger, shutdown };
+    const context = { authState, signal: controller.signal, logger, settings, shutdown };
     if (args.length) await resolveInput(rl, api, args.join(' '), context);
     while (!controller.signal.aborted) {
       const prompt = authState.loggedIn ? '\n搜索歌曲、输入 ID 点歌 > ' : '\n搜索歌曲、输入 ID 点歌，或 /login > ';

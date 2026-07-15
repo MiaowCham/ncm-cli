@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand, parseLyricAction,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection,
-  parseQualityCommand, parseSignoutCommand, parseClearCommand
+  parseOffsetCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand
 } from '../src/parsers.js';
 
 test('识别所有约定的 ID 点歌语法', () => {
@@ -37,6 +37,17 @@ test('识别音质命令', () => {
   assert.deepEqual(parseQualityCommand('/QUALITY LossLess'), { level: 'lossless' });
   assert.deepEqual(parseQualityCommand('/quality invalid value'), { level: 'invalid value' });
   assert.equal(parseQualityCommand('quality lossless'), null);
+});
+
+test('识别歌词偏移命令并报告非法参数', () => {
+  assert.deepEqual(parseOffsetCommand('/offset'), { milliseconds: null });
+  assert.deepEqual(parseOffsetCommand('/OFFSET +2000'), { milliseconds: 2000 });
+  assert.deepEqual(parseOffsetCommand('/offset -750'), { milliseconds: -750 });
+  assert.deepEqual(parseOffsetCommand('/offset 1.5'), {
+    milliseconds: null,
+    error: '歌词偏移量必须是整数毫秒'
+  });
+  assert.equal(parseOffsetCommand('offset 2000'), null);
 });
 
 test('识别歌词输出语法', () => {

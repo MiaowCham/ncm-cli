@@ -4,6 +4,13 @@ import { configFilePath } from './cookie-store.js';
 import { QUALITY_LEVELS } from './parsers.js';
 
 export const DEFAULT_QUALITY = 'standard';
+export const DEFAULT_LYRIC_OFFSET_MS = 2000;
+export const MIN_LYRIC_OFFSET_MS = -60000;
+export const MAX_LYRIC_OFFSET_MS = 60000;
+
+function validLyricOffset(value) {
+  return Number.isInteger(value) && value >= MIN_LYRIC_OFFSET_MS && value <= MAX_LYRIC_OFFSET_MS;
+}
 
 export function settingsFilePath(env = process.env, platform = process.platform) {
   return path.join(path.dirname(configFilePath(env, platform)), 'settings.json');
@@ -13,18 +20,26 @@ export async function loadSettings(file = settingsFilePath()) {
   try {
     const data = JSON.parse(await readFile(file, 'utf8'));
     return {
-      quality: QUALITY_LEVELS.includes(data.quality) ? data.quality : DEFAULT_QUALITY
+      quality: QUALITY_LEVELS.includes(data.quality) ? data.quality : DEFAULT_QUALITY,
+      lyricOffsetMs: validLyricOffset(data.lyricOffsetMs) ? data.lyricOffsetMs : DEFAULT_LYRIC_OFFSET_MS
     };
   } catch (error) {
-    if (error.code === 'ENOENT' || error instanceof SyntaxError) return { quality: DEFAULT_QUALITY };
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) {
+      return { quality: DEFAULT_QUALITY, lyricOffsetMs: DEFAULT_LYRIC_OFFSET_MS };
+    }
     throw error;
   }
 }
 
 export async function saveSettings(settings, file = settingsFilePath()) {
-  if (!QUALITY_LEVELS.includes(settings.quality)) throw new Error(`不支持的音质等级：${settings.quality}`);
+  const current = await loadSettings(file);
+  const next = { ...current, ...settings };
+  if (!QUALITY_LEVELS.includes(next.quality)) throw new Error(`不支持的音质等级：${next.quality}`);
+  if (!validLyricOffset(next.lyricOffsetMs)) {
+    throw new Error(`歌词偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒`);
+  }
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await writeFile(file, `${JSON.stringify({ quality: settings.quality, updatedAt: new Date().toISOString() }, null, 2)}\n`, {
+  await writeFile(file, `${JSON.stringify({ ...next, updatedAt: new Date().toISOString() }, null, 2)}\n`, {
     encoding: 'utf8',
     mode: 0o600
   });

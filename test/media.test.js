@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attachLyricTranslations, createPlaybackClock, imageProtocolOrder, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playerArguments, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
+import { attachLyricTranslations, createPlaybackClock, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playerArguments, supportsSixelEnvironment, toggleTranslationState } from '../src/media.js';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
   assert.equal(supportsSixelEnvironment({ env: { WT_SESSION: 'session' }, platform: 'win32', windowsTerminalVersion: '1.21.9999.0' }), false);
@@ -18,8 +18,27 @@ test('图像协议优先原生图形并保留安全降级顺序', () => {
 test('刷新间隔取下一秒与下一行歌词中的较早者', () => {
   const lines = [{ timeMs: 1800, text: 'next' }];
   assert.equal(nextRefreshDelay(1500, lines), 300);
+  assert.equal(nextRefreshDelay(3500, lines, false, 2000), 300);
   assert.equal(nextRefreshDelay(1000, [], false), 1000);
   assert.equal(nextRefreshDelay(1500, lines, true), 1000);
+});
+
+test('歌词位置默认延后两秒并支持正负毫秒偏移', () => {
+  assert.equal(lyricPosition(0), -2000);
+  assert.equal(lyricPosition(3000), 1000);
+  assert.equal(lyricPosition(3000, 0), 3000);
+  assert.equal(lyricPosition(3000, -500), 3500);
+  assert.equal(lyricPosition(3000, Number.NaN), 1000);
+});
+
+test('歌词偏移在时间戳边界精确切换当前行', () => {
+  const lines = [
+    { timeMs: 0, text: '第一行' },
+    { timeMs: 1000, text: '第二行' }
+  ];
+  assert.equal(lyricViewport(lines, lyricPosition(2999), 2)[0].text, '第一行');
+  assert.equal(lyricViewport(lines, lyricPosition(3000), 2)[0].text, '第二行');
+  assert.equal(lyricViewport(lines, lyricPosition(500, -500), 2)[0].text, '第二行');
 });
 
 test('播放器偏移参数覆盖 ffplay/mpv/vlc', () => {
