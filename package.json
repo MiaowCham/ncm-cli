@@ -7,6 +7,8 @@
     "ncm": "./bin/ncm.js"
   },
   "scripts": {
+    "postinstall": "node ./scripts/build-smtc.js",
+    "build:smtc": "node ./scripts/build-smtc.js --required",
     "start": "node ./bin/ncm.js",
     "test": "node --test",
     "test:live": "node ./scripts/live-api.js"

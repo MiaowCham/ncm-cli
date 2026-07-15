@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import stringWidth from 'string-width';
 import supportsTerminalGraphics from 'supports-terminal-graphics';
 import { parseLrc } from './lyrics.js';
+import { createSmtcBridge } from './smtc.js';
 
 let cachedWindowsTerminalVersion;
 
@@ -137,6 +138,11 @@ export function createPlaybackClock(durationMs, now = () => performance.now()) {
     },
     seek(deltaMs) {
       basePositionMs = clamp(position() + deltaMs, 0, durationMs);
+      startedAt = now();
+      return basePositionMs;
+    },
+    seekTo(positionMs) {
+      basePositionMs = clamp(Number(positionMs) || 0, 0, durationMs);
       startedAt = now();
       return basePositionMs;
     }
@@ -454,7 +460,15 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
   let child = null;
   let finished = false;
   let refreshTimer = null;
+  let smtcTimer = null;
   let dynamicRow = 1;
+  let dispatchPlaybackAction = () => {};
+  const smtc = await createSmtcBridge({
+    song,
+    durationMs,
+    logger,
+    onControl: (action) => dispatchPlaybackAction(action)
+  });
   const intentionalStops = new WeakSet();
   let resolveCompletion;
   let rejectCompletion;
@@ -466,6 +480,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
   const spawnAt = (positionMs) => {
     const instance = spawn(player.command, player.args(url, positionMs / 1000, volume), { stdio: 'ignore', windowsHide: true });
     child = instance;
+    smtc.updatePlayback({ status: 'playing', positionMs, durationMs });
     void logger?.info('player_spawn', { player: player.command, pid: instance.pid, positionMs });
     instance.once('error', (error) => {
       if (!finished && !intentionalStops.has(instance)) rejectCompletion(error);
@@ -474,6 +489,7 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
       void logger?.info('player_exit', { player: player.command, code, signal: exitSignal });
       if (!finished && child === instance && !intentionalStops.has(instance)) {
         finished = true;
+        smtc.updatePlayback({ status: 'stopped', positionMs: clock.position(), durationMs });
         resolveCompletion('ended');
       }
     });
@@ -518,40 +534,47 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     finished = true;
     if (refreshTimer) clearTimeout(refreshTimer);
     await stopCurrent();
+    smtc.updatePlayback({ status: 'stopped', positionMs: clock.position(), durationMs });
     resolveCompletion(reason);
   });
 
-  const handleData = (buffer) => {
-    const action = playbackAction(buffer);
+  dispatchPlaybackAction = (action) => {
     if (action.type === 'interrupt') {
       onInterrupt?.();
       return;
     }
-    if (action.type === 'quit') {
-      finish('quit');
+    if (action.type === 'quit' || action.action === 'stop') {
+      finish(action.action === 'stop' ? 'smtc_stop' : 'quit');
       return;
     }
-    if (action.type === 'toggle_pause') {
+    if (action.type === 'toggle_pause' || action.action === 'play' || action.action === 'pause') {
       enqueue(async () => {
-        if (clock.paused) {
+        const shouldPlay = action.action === 'play' || (action.type === 'toggle_pause' && clock.paused);
+        const shouldPause = action.action === 'pause' || (action.type === 'toggle_pause' && !clock.paused);
+        if (shouldPlay && clock.paused) {
           const resumeAt = clock.resume();
           spawnAt(resumeAt);
           setIndicator('继续播放');
-        } else {
+        } else if (shouldPause && !clock.paused) {
           clock.pause();
           await stopCurrent();
+          smtc.updatePlayback({ status: 'paused', positionMs: clock.position(), durationMs });
           setIndicator('已暂停');
         }
       });
       return;
     }
-    if (action.type === 'seek') {
+    if (action.type === 'seek' || action.action === 'fast_forward' || action.action === 'rewind' || action.action === 'seek_absolute') {
       enqueue(async () => {
-        const seekTo = clock.seek(action.deltaMs);
-        setIndicator(action.deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
+        const deltaMs = action.action === 'fast_forward' ? 5000 : action.action === 'rewind' ? -5000 : action.deltaMs;
+        const seekTo = action.action === 'seek_absolute' ? clock.seekTo(action.positionMs) : clock.seek(deltaMs);
+        if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(seekTo)}`);
+        else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
         if (!clock.paused) {
           await stopCurrent();
           spawnAt(seekTo);
+        } else {
+          smtc.updatePlayback({ status: 'paused', positionMs: seekTo, durationMs });
         }
       });
       return;
@@ -576,6 +599,8 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
       });
     }
   };
+
+  const handleData = (buffer) => dispatchPlaybackAction(playbackAction(buffer));
 
   const abort = () => enqueue(async () => {
     if (finished) return;
@@ -611,15 +636,27 @@ export async function playWithProgress({ song, url, durationMs, lyricSource = ''
     if (signal?.aborted) abort();
     else {
       spawnAt(clock.position());
+      smtcTimer = setInterval(() => {
+        if (!finished) {
+          smtc.updatePlayback({
+            status: clock.paused ? 'paused' : 'playing',
+            positionMs: clock.position(),
+            durationMs
+          });
+        }
+      }, 1000);
       render();
     }
     return await completion;
   } finally {
     finished = true;
     if (refreshTimer) clearTimeout(refreshTimer);
+    if (smtcTimer) clearInterval(smtcTimer);
     signal?.removeEventListener('abort', abort);
     process.stdout.removeListener('resize', resize);
     await stopCurrent();
+    smtc.updatePlayback({ status: 'stopped', positionMs: clock.position(), durationMs });
+    await smtc.close();
     restoreInput();
     if (tty) process.stdout.write('\x1b[?25h\x1b[?1049l');
   }

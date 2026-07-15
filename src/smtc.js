@@ -1,0 +1,303 @@
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PROTOCOL_VERSION = 1;
+const DEFAULT_READY_TIMEOUT_MS = 3000;
+const DEFAULT_CLOSE_TIMEOUT_MS = 1000;
+const DEFAULT_MAX_LINE_BYTES = 64 * 1024;
+const CONTROL_ACTIONS = new Set([
+  'play',
+  'pause',
+  'stop',
+  'seek_absolute',
+  'seek_relative',
+  'fast_forward',
+  'rewind'
+]);
+
+function log(logger, level, event, data = {}) {
+  try { void logger?.[level]?.(event, data); } catch {}
+}
+
+function noOpBridge(sessionId = '') {
+  return {
+    available: false,
+    sessionId,
+    setMetadata: async () => false,
+    updatePlayback: () => false,
+    close: async () => {}
+  };
+}
+
+function finiteInteger(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : fallback;
+}
+
+function httpsUri(value) {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(String(value));
+    return parsed.protocol === 'https:' ? parsed.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function metadataFrom(song = {}, durationMs = 0, coverPath, overrides = {}) {
+  const source = { ...song, ...overrides };
+  const artists = Array.isArray(source.artists) ? source.artists.join('/') : source.artist;
+  const metadata = {
+    trackId: String(source.trackId ?? source.id ?? ''),
+    title: String(source.title ?? source.name ?? ''),
+    artist: String(artists ?? ''),
+    album: String(source.album ?? ''),
+    durationMs: finiteInteger(source.durationMs, finiteInteger(durationMs))
+  };
+  const localCover = source.coverPath ?? coverPath;
+  if (typeof localCover === 'string' && path.isAbsolute(localCover)) metadata.coverPath = localCover;
+  const remoteCover = httpsUri(source.coverUri ?? source.cover);
+  if (remoteCover) metadata.coverUri = remoteCover;
+  return metadata;
+}
+
+function helperSpec(helperCommand) {
+  if (Array.isArray(helperCommand) && helperCommand.length) {
+    return { command: helperCommand[0], args: helperCommand.slice(1) };
+  }
+  if (helperCommand && typeof helperCommand === 'object') {
+    return { command: helperCommand.command, args: helperCommand.args || [] };
+  }
+  if (typeof helperCommand === 'string' && helperCommand) return { command: helperCommand, args: [] };
+  if (process.env.NCM_SMTC_HELPER) return { command: process.env.NCM_SMTC_HELPER, args: [] };
+  const runtime = process.arch === 'arm64' ? 'win-arm64' : 'win-x64';
+  const root = fileURLToPath(new URL('../native/smtc-bridge/', import.meta.url));
+  const candidates = [
+    path.join(root, 'publish', runtime, 'ncm-cli-smtc-bridge.exe'),
+    path.join(root, 'ncm-cli-smtc-bridge.exe'),
+    path.join(root, 'bin', 'Release', 'net8.0-windows10.0.19041.0', runtime, 'publish', 'ncm-cli-smtc-bridge.exe'),
+    path.join(root, 'bin', 'Debug', 'net8.0-windows10.0.19041.0', 'ncm-cli-smtc-bridge.exe')
+  ];
+  const executable = candidates.find((candidate) => existsSync(candidate)) || candidates[0];
+  return { command: executable, args: [] };
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, timeoutMs);
+    function done() {
+      clearTimeout(timer);
+      child.removeListener('exit', done);
+      child.removeListener('close', done);
+      resolve();
+    }
+    child.once('exit', done);
+    child.once('close', done);
+  });
+}
+
+/**
+ * 创建 Windows SMTC 的容错桥接。helper 的 stdout 必须只输出 NDJSON 协议消息。
+ * 非 Windows 或 helper 不可用时返回同接口的 no-op bridge。
+ */
+export async function createSmtcBridge({
+  song = {},
+  durationMs = song.durationMs || 0,
+  coverPath,
+  logger,
+  onControl = () => {},
+  helperCommand,
+  platform = process.platform,
+  spawnImpl = spawn,
+  readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
+  closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS,
+  maxLineBytes = DEFAULT_MAX_LINE_BYTES,
+  sessionId = randomUUID()
+} = {}) {
+  if (platform !== 'win32') return noOpBridge(sessionId);
+
+  const spec = helperSpec(helperCommand);
+  let child;
+  try {
+    child = spawnImpl(spec.command, spec.args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: false
+    });
+  } catch (error) {
+    log(logger, 'warn', 'smtc_spawn_failed', { error });
+    return noOpBridge(sessionId);
+  }
+
+  let alive = true;
+  let ready = false;
+  let closed = false;
+  let revision = 0;
+  let buffered = Buffer.alloc(0);
+  let droppingOversizedLine = false;
+  const requestIds = new Set();
+  const requestOrder = [];
+
+  const markUnavailable = (reason, error) => {
+    if (!alive) return;
+    alive = false;
+    ready = false;
+    log(logger, 'warn', 'smtc_unavailable', { reason, error });
+  };
+
+  const write = (message, requireReady = true) => {
+    if (!alive || closed || (requireReady && !ready) || !child.stdin?.writable) return false;
+    try {
+      child.stdin.write(`${JSON.stringify({ v: PROTOCOL_VERSION, sessionId, ...message })}\n`, (error) => {
+        if (error) markUnavailable('stdin_write_failed', error);
+      });
+      return true;
+    } catch (error) {
+      markUnavailable('stdin_write_failed', error);
+      return false;
+    }
+  };
+
+  let resolveReady;
+  const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
+  const finishStartup = (success) => {
+    if (!resolveReady) return;
+    const resolve = resolveReady;
+    resolveReady = null;
+    resolve(success);
+  };
+
+  const handleMessage = (message) => {
+    if (!message || message.v !== PROTOCOL_VERSION || message.sessionId !== sessionId) return;
+    if (message.type === 'ready') {
+      ready = true;
+      finishStartup(true);
+      return;
+    }
+    if (message.type !== 'control' || !ready || !CONTROL_ACTIONS.has(message.action)) return;
+    if (!['string', 'number'].includes(typeof message.requestId)) return;
+    const requestId = String(message.requestId);
+    if (requestIds.has(requestId)) return;
+    requestIds.add(requestId);
+    requestOrder.push(requestId);
+    if (requestOrder.length > 1024) requestIds.delete(requestOrder.shift());
+    const control = { action: message.action };
+    if (message.action.startsWith('seek_')) {
+      const position = Number(message.positionMs ?? message.deltaMs);
+      if (!Number.isFinite(position)) return;
+      if (message.action === 'seek_absolute') control.positionMs = Math.max(0, Math.round(position));
+      else control.deltaMs = Math.round(position);
+    }
+    try {
+      const result = onControl(control);
+      if (result && typeof result.catch === 'function') {
+        result.catch((error) => log(logger, 'warn', 'smtc_control_failed', { action: message.action, error }));
+      }
+    } catch (error) {
+      log(logger, 'warn', 'smtc_control_failed', { action: message.action, error });
+    }
+  };
+
+  const consumeLine = (line) => {
+    if (line.length > maxLineBytes) {
+      log(logger, 'warn', 'smtc_protocol_line_too_long', { bytes: line.length });
+      return;
+    }
+    const text = line.toString('utf8').trim();
+    if (!text) return;
+    try { handleMessage(JSON.parse(text)); }
+    catch (error) { log(logger, 'warn', 'smtc_protocol_invalid_json', { error }); }
+  };
+
+  const onData = (chunk) => {
+    let incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (droppingOversizedLine) {
+      const newline = incoming.indexOf(0x0a);
+      if (newline < 0) return;
+      incoming = incoming.subarray(newline + 1);
+      droppingOversizedLine = false;
+    }
+    buffered = Buffer.concat([buffered, incoming]);
+    let newline;
+    while ((newline = buffered.indexOf(0x0a)) >= 0) {
+      consumeLine(buffered.subarray(0, newline));
+      buffered = buffered.subarray(newline + 1);
+    }
+    if (buffered.length > maxLineBytes) {
+      buffered = Buffer.alloc(0);
+      droppingOversizedLine = true;
+      log(logger, 'warn', 'smtc_protocol_line_too_long', { bytes: `>${maxLineBytes}` });
+    }
+  };
+
+  child.stdout?.on('data', onData);
+  child.once('error', (error) => {
+    markUnavailable('process_error', error);
+    finishStartup(false);
+  });
+  child.once('exit', (code, signal) => {
+    if (!closed) markUnavailable('process_exit', { code, signal });
+    finishStartup(false);
+  });
+  child.stderr?.on('data', (chunk) => {
+    log(logger, 'debug', 'smtc_helper_stderr', { message: String(chunk).slice(0, 1000) });
+  });
+
+  write({
+    type: 'initialize',
+    controls: { play: true, pause: true, stop: true, seek: true, rewind: true, fastForward: true }
+  }, false);
+
+  const startupTimer = setTimeout(() => finishStartup(false), readyTimeoutMs);
+  const started = await readyPromise;
+  clearTimeout(startupTimer);
+  if (!started) {
+    markUnavailable('ready_timeout');
+    try { child.stdin?.end(); } catch {}
+    try { child.kill(); } catch {}
+    return noOpBridge(sessionId);
+  }
+
+  let currentMetadata = metadataFrom(song, durationMs, coverPath);
+  write({ type: 'metadata', ...currentMetadata });
+
+  return {
+    get available() { return alive && ready && !closed; },
+    sessionId,
+    async setMetadata(overrides = {}) {
+      currentMetadata = metadataFrom(currentMetadata, durationMs, coverPath, overrides);
+      return write({ type: 'metadata', ...currentMetadata });
+    },
+    updatePlayback({ status, positionMs = 0, durationMs: nextDuration = currentMetadata.durationMs, rate = 1 } = {}) {
+      if (!['playing', 'paused', 'stopped'].includes(status)) return false;
+      const safeDuration = finiteInteger(nextDuration, currentMetadata.durationMs);
+      const safePosition = Math.min(finiteInteger(positionMs), safeDuration);
+      revision += 1;
+      return write({
+        type: 'playback',
+        revision,
+        status,
+        positionMs: safePosition,
+        durationMs: safeDuration,
+        rate: Number.isFinite(Number(rate)) && Number(rate) > 0 ? Number(rate) : 1
+      });
+    },
+    async close() {
+      if (closed) return;
+      if (alive && ready) write({ type: 'shutdown' });
+      closed = true;
+      ready = false;
+      try { child.stdin?.end(); } catch {}
+      await waitForChildExit(child, closeTimeoutMs);
+      if (child.exitCode === null) {
+        try { child.kill(); } catch {}
+        await waitForChildExit(child, Math.min(250, closeTimeoutMs));
+      }
+      alive = false;
+    }
+  };
+}

@@ -1,0 +1,6 @@
+test/
+coverage/
+*.lrc
+native/**/bin/
+native/**/obj/
+native/**/publish/

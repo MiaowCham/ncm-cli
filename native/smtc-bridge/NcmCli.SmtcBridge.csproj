@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ncm-cli-smtc-bridge</AssemblyName>
+    <RootNamespace>NcmCli.SmtcBridge</RootNamespace>
+  </PropertyGroup>
+</Project>
