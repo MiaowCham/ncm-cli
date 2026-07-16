@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { commandCompleter, SLASH_COMMANDS } from '../src/completion.js';
-import { QUALITY_LEVELS } from '../src/parsers.js';
+import { IMAGE_PROTOCOLS, PLAYER_BACKENDS, QUALITY_LEVELS } from '../src/parsers.js';
 
 test('斜杠命令可按前缀补全', () => {
   assert.deepEqual(commandCompleter('/'), [SLASH_COMMANDS, '/']);
@@ -26,6 +26,21 @@ test('/quality 补全所有音质参数并保留命令前缀', () => {
     ['/QUALITY jyeffect', '/QUALITY jymaster'],
     '/QUALITY jy'
   ]);
+});
+
+test('/player 补全播放器后端', () => {
+  assert.deepEqual(
+    commandCompleter('/player '),
+    [PLAYER_BACKENDS.map((backend) => `/player ${backend}`), '/player ']
+  );
+  assert.deepEqual(commandCompleter('/player v'), [['/player vlc'], '/player v']);
+});
+
+test('/image 补全图片协议', () => {
+  assert.deepEqual(commandCompleter('/image '), [
+    IMAGE_PROTOCOLS.map((protocol) => `/image ${protocol}`), '/image '
+  ]);
+  assert.deepEqual(commandCompleter('/image s'), [['/image sixel', '/image symbols'], '/image s']);
 });
 
 test('/login 补全 status 参数', () => {

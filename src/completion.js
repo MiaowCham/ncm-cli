@@ -1,4 +1,4 @@
-import { QUALITY_LEVELS } from './parsers.js';
+import { IMAGE_PROTOCOLS, PLAYER_BACKENDS, QUALITY_LEVELS } from './parsers.js';
 
 export const SLASH_COMMANDS = Object.freeze([
   '/id',
@@ -9,6 +9,8 @@ export const SLASH_COMMANDS = Object.freeze([
   '/login',
   '/signout',
   '/quality',
+  '/player',
+  '/image',
   '/offset',
   '/smtcoffset',
   '/api',
@@ -26,6 +28,8 @@ export const COMMAND_DESCRIPTIONS = Object.freeze({
   '/login': '登录或查看登录状态',
   '/signout': '退出登录',
   '/quality': '查看或设置音质',
+  '/player': '查看或设置播放器后端',
+  '/image': '查看或设置终端图片协议',
   '/offset': '查看或设置播放偏移',
   '/smtcoffset': '查看或设置 SMTC 额外偏移',
   '/api': '查看或更换 API 地址',
@@ -82,6 +86,12 @@ export function commandCompleter(input) {
   if (command === '/quality') {
     return completeValues(line, prefix, argument, QUALITY_LEVELS);
   }
+  if (command === '/player') {
+    return completeValues(line, prefix, argument, PLAYER_BACKENDS);
+  }
+  if (command === '/image') {
+    return completeValues(line, prefix, argument, IMAGE_PROTOCOLS);
+  }
   if (command === '/login') {
     return completeValues(line, prefix, argument, ['status']);
   }
@@ -91,4 +101,3 @@ export function commandCompleter(input) {
 
   return [[], line];
 }
-

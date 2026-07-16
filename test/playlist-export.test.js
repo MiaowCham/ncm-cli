@@ -22,6 +22,12 @@ test('解析歌单导出格式及格式选项中的输出目标', () => {
   assert.deepEqual(parsePlaylistExportFormatSelection('4 | "out.tsv"'), {
     quit: false, format: 'tsv', output: '"out.tsv"'
   });
+  assert.deepEqual(parsePlaylistExportFormatSelection('3 >'), {
+    quit: false, format: 'csv', output: null
+  });
+  assert.deepEqual(parsePlaylistExportFormatSelection('4 |'), {
+    quit: false, format: 'tsv', output: null
+  });
   assert.deepEqual(parsePlaylistExportFormatSelection('q'), { quit: true });
   assert.equal(parsePlaylistExportFormatSelection('5'), null);
 });

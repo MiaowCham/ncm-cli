@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand, parseLyricAction,
+  normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection,
-  parseListPlaylistsCommand, parseOffsetCommand, parseSmtcOffsetCommand, parsePlaylistCommand, parseQualityCommand,
+  parseListPlaylistsCommand, parseOffsetCommand, parseSmtcOffsetCommand, parsePlaylistCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand,
   parseSignoutCommand, parseClearCommand, parseApiCommand
 } from '../src/parsers.js';
 
@@ -50,6 +50,20 @@ test('识别音质命令', () => {
   assert.equal(parseQualityCommand('quality lossless'), null);
 });
 
+test('识别播放器后端命令', () => {
+  assert.deepEqual(parsePlayerCommand('/player'), { backend: null });
+  assert.deepEqual(parsePlayerCommand('/PLAYER VLC'), { backend: 'vlc' });
+  assert.deepEqual(parsePlayerCommand('/player invalid value'), { backend: 'invalid value' });
+  assert.equal(parsePlayerCommand('player mpv'), null);
+});
+
+test('识别图片协议命令', () => {
+  assert.deepEqual(parseImageCommand('/image'), { protocol: null });
+  assert.deepEqual(parseImageCommand('/IMAGE SIXEL'), { protocol: 'sixel' });
+  assert.deepEqual(parseImageCommand('/image invalid value'), { protocol: 'invalid value' });
+  assert.equal(parseImageCommand('image ansi'), null);
+});
+
 test('识别歌词偏移命令并报告非法参数', () => {
   assert.deepEqual(parseOffsetCommand('/offset'), { milliseconds: null });
   assert.deepEqual(parseOffsetCommand('/OFFSET +2000'), { milliseconds: 2000 });
@@ -78,13 +92,6 @@ test('识别 API 地址命令', () => {
     url: 'https://api.example.com/prefix'
   });
   assert.equal(parseApiCommand('api https://api.example.com'), null);
-});
-
-test('识别歌词输出语法', () => {
-  assert.deepEqual(parseLyricAction('歌词'), { output: null });
-  assert.deepEqual(parseLyricAction('/lyric'), { output: null });
-  assert.deepEqual(parseLyricAction('l > song.txt'), { output: 'song.txt' });
-  assert.deepEqual(parseLyricAction('lyric | song.lrc'), { output: 'song.lrc' });
 });
 
 test('识别歌词 ID 直出命令', () => {

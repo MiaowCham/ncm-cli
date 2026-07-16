@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { adjustPlaybackOffset, attachLyricTranslations, createLatestDebounce, createPlaybackClock, displayPosition, imageProtocolOrder, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playlistViewport, rawPosition, smtcTimeline, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
+import { adjustPlaybackOffset, attachLyricTranslations, createLatestDebounce, createPlaybackClock, displayPosition, imageProtocolOrder, LOOP_MODES, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackPlaylistModeRows, playbackPlaylistModeText, playbackProgressText, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playerBackendLabel, playerCommandsForBackend, playlistViewport, RANDOM_MODES, rawPosition, resolveCommandExecutable, shouldSyncPlayerPosition, shuffledPlaylistOrder, smtcTimeline, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
 import stringWidth from 'string-width';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
@@ -12,9 +12,14 @@ test('SIXEL 只在已确认支持的终端环境启用', () => {
 });
 
 test('图像协议优先原生图形并保留安全降级顺序', () => {
-  assert.deepEqual(imageProtocolOrder({ nativeGraphics: true, sixel: true, chafa: true }), ['native', 'sixel', 'symbols', 'ansi']);
+  assert.deepEqual(imageProtocolOrder({ kitty: true, sixel: true, chafa: true }), ['kitty', 'sixel', 'symbols', 'ansi']);
   assert.deepEqual(imageProtocolOrder({ nativeGraphics: false, sixel: true, chafa: false }), ['ansi']);
   assert.deepEqual(imageProtocolOrder({ nativeGraphics: false, sixel: false, chafa: true }), ['symbols', 'ansi']);
+  assert.deepEqual(imageProtocolOrder({ preference: 'sixel', sixel: true, chafa: true }), ['sixel', 'ansi']);
+  assert.deepEqual(imageProtocolOrder({ preference: 'sixel', sixel: false, chafa: true }), ['sixel', 'ansi']);
+  assert.deepEqual(imageProtocolOrder({ preference: 'sixel', sixel: true, chafa: false }), ['ansi']);
+  assert.deepEqual(imageProtocolOrder({ preference: 'kitty', kitty: false }), ['ansi']);
+  assert.deepEqual(imageProtocolOrder({ preference: 'none' }), []);
 });
 
 test('刷新间隔取下一秒与下一行歌词中的较早者', () => {
@@ -68,6 +73,34 @@ test('播放器偏移参数覆盖 ffplay/mpv/vlc', () => {
   assert.ok(playerArguments('vlc', 'song.mp3', 5, 80).includes('--volume=205'));
 });
 
+test('播放器后端标签区分常驻控制与兼容模式', () => {
+  assert.equal(playerBackendLabel('mpv'), 'mpv（JSON IPC）');
+  assert.equal(playerBackendLabel('vlc'), 'VLC（oldrc）');
+  assert.equal(playerBackendLabel('cvlc', { persistent: false }), 'VLC（兼容模式）');
+  assert.equal(playerBackendLabel('ffplay'), 'ffplay（兼容模式）');
+  assert.equal(playerBackendLabel(null), '未找到');
+});
+
+test('播放器设置映射到受限候选列表', () => {
+  assert.deepEqual(playerCommandsForBackend('auto'), ['mpv', 'vlc', 'cvlc', 'ffplay']);
+  assert.deepEqual(playerCommandsForBackend('mpv'), ['mpv']);
+  assert.deepEqual(playerCommandsForBackend('vlc'), ['vlc', 'cvlc']);
+  assert.deepEqual(playerCommandsForBackend('ffplay'), ['ffplay']);
+});
+
+test('Windows 明确解析 exe，避免裸 mpv 优先命中 mpv.com', () => {
+  const calls = [];
+  const executable = resolveCommandExecutable('mpv', {
+    platform: 'win32',
+    probe(command, args) {
+      calls.push({ command, args });
+      return { status: 0, stdout: 'F:\\mpv\\mpv.exe\r\n' };
+    }
+  });
+  assert.equal(executable, 'F:\\mpv\\mpv.exe');
+  assert.deepEqual(calls, [{ command: 'where.exe', args: ['mpv.exe'] }]);
+});
+
 test('播放快捷键解析退出、刷新、暂停、跳转、音量、翻译与 Ctrl+C', () => {
   assert.deepEqual(playbackAction('q'), { type: 'quit' });
   assert.deepEqual(playbackAction('r'), { type: 'refresh' });
@@ -105,6 +138,20 @@ test('歌单覆盖层接管上下键、Enter 和 Esc', () => {
   assert.deepEqual(playbackAction('\u001b[A'), { type: 'volume', delta: 5 });
 });
 
+test('播放页用两个独立按键切换随机和循环模式', () => {
+  assert.deepEqual(playbackAction('s'), { type: 'cycle_random_mode' });
+  assert.deepEqual(playbackAction('l'), { type: 'cycle_loop_mode' });
+  assert.deepEqual(RANDOM_MODES, ['off', 'random', 'shuffle']);
+  assert.deepEqual(LOOP_MODES, ['sequence', 'list', 'single']);
+});
+
+test('打乱列表保留当前歌曲为起点且每首只出现一次', () => {
+  const values = [0.1, 0.8, 0.3];
+  const order = shuffledPlaylistOrder(5, 2, () => values.shift() ?? 0);
+  assert.equal(order[0], 2);
+  assert.deepEqual([...order].sort((a, b) => a - b), [0, 1, 2, 3, 4]);
+});
+
 test('SGR 滚轮只在歌单覆盖层中移动选择且不影响音量', () => {
   const open = { playlistOpen: true, playlistSelection: 3 };
   assert.deepEqual(playbackAction('\u001b[<64;10;5M', open), { type: 'playlist_move', delta: -1 });
@@ -125,15 +172,31 @@ test('播放页鼠标报告模式进入与退出序列成对恢复', () => {
   assert.equal(playbackTerminalModeSequence(false), '\u001b[?1000l\u001b[?1006l\u001b[?1007h');
 });
 
-test('只有存在播放队列时快捷提示才显示歌单操作', () => {
+test('常驻快捷提示不混入歌单操作', () => {
   assert.equal(playbackShortcutText().includes('歌单'), false);
-  assert.match(playbackShortcutText({ hasPlaylist: true }), /p 歌单/);
-  assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Enter 播放/);
-  assert.equal(playbackShortcutText({ hasPlaylist: false, playlistOpen: true }).includes('歌单'), false);
+  assert.equal(playbackShortcutText({ hasPlaylist: true }).includes('歌单'), false);
   assert.match(playbackShortcutText(), /Ctrl\+↑\/↓ 偏移/);
   assert.match(playbackShortcutText(), /r 刷新/);
-  assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /r 刷新/);
-  assert.match(playbackShortcutText({ hasPlaylist: true, playlistOpen: true }), /Ctrl\+↑\/↓ 偏移/);
+});
+
+test('随机循环指示器包含按键和歌单播放操作', () => {
+  const closed = playbackPlaylistModeText({ randomLabel: '纯随机', loopLabel: '列表循环' });
+  assert.match(closed, /\[s 随机：纯随机\]/);
+  assert.match(closed, /\[l 循环：列表循环\]/);
+  assert.match(closed, /p 歌单/);
+  const open = playbackPlaylistModeText({ randomLabel: '不随机', loopLabel: '顺序播放', playlistOpen: true });
+  assert.match(open, /Enter 播放/);
+  assert.match(open, /p\/Esc 关闭/);
+});
+
+test('歌单控制指示器按完整控制项自动换行', () => {
+  const rows = playbackPlaylistModeRows({
+    randomLabel: '打乱列表', loopLabel: '列表循环', playlistOpen: true
+  }, 34);
+  assert.ok(rows.length > 1);
+  assert.ok(rows.every((row) => stringWidth(row) <= 34));
+  assert.equal(rows.join('  ').includes('[Enter 播放]'), true);
+  assert.equal(rows.join('  ').includes('[s 随机：打乱列表]'), true);
 });
 
 test('窄窗口中的快捷键提示按显示宽度换行而不是省略', () => {
@@ -145,6 +208,12 @@ test('窄窗口中的快捷键提示按显示宽度换行而不是省略', () =>
   assert.equal(rows.join('').replaceAll(' ', ''), source.replaceAll(' ', ''));
   assert.ok(segments.every((segment) => stringWidth(segment) > 24 || rows.some((row) => row.includes(segment))));
   assert.deepEqual(wrapTerminalText('中文abc', 4), ['中文', 'abc']);
+});
+
+test('终端文本优先按英文词边界换行并按宽度拆分中文', () => {
+  assert.deepEqual(wrapTerminalText('hello wonderful world', 12), ['hello', 'wonderful', 'world']);
+  assert.deepEqual(wrapTerminalText('hello world', 11), ['hello world']);
+  assert.deepEqual(wrapTerminalText('一二三四五六', 6), ['一二三', '四五六']);
 });
 
 test('SMTC offset 只修正位置且不缩短歌曲物理时长', () => {
@@ -231,6 +300,18 @@ test('播放器收到终止信号后不会继续等待退出超时', async () =>
   assert.ok(performance.now() - startedAt < 250);
 });
 
+test('暂停标记紧邻进度条且窄窗口优先保留', () => {
+  assert.equal(playbackProgressText({ bar: '=>', timeText: '00:12 / 03:45', paused: true, columns: 80 }), '[=>] [已暂停] 00:12 / 03:45');
+  assert.equal(playbackProgressText({ bar: '>', timeText: '00:12 / 03:45', paused: true, columns: 12 }), '[>] [已暂停]');
+});
+
+test('mpv 时间位置仅在明显偏离本地时钟时触发同步', () => {
+  assert.equal(shouldSyncPlayerPosition(10_000, 10.4), false);
+  assert.equal(shouldSyncPlayerPosition(10_000, 10.75), true);
+  assert.equal(shouldSyncPlayerPosition(10_000, 42), true);
+  assert.equal(shouldSyncPlayerPosition(10_000, Number.NaN), false);
+});
+
 test('切歌等待可被独立信号立即取消', async () => {
   let resolveSource;
   const source = new Promise((resolve) => { resolveSource = resolve; });
@@ -296,6 +377,26 @@ test('翻译按实际终端行数裁剪且极小容量不溢出', () => {
   assert.deepEqual(playbackLyricRows(lines, 1500, 1, true).map((line) => line.text), ['当前']);
   assert.deepEqual(playbackLyricRows(lines, 1500, 2, true).map((line) => line.text), ['当前', 'current']);
   assert.deepEqual(playbackLyricRows(lines, 1500, 4, true).map((line) => line.text), ['当前', 'current', '未来', 'future']);
+});
+
+test('播放歌词按词换行且所有续行继承当前行高亮', () => {
+  const lines = [{ timeMs: 0, text: 'hello wonderful world', translation: '' }];
+  const rows = playbackLyricRows(lines, 1000, 3, false, 10);
+  assert.deepEqual(rows.map((line) => line.text), ['hello', 'wonderful', 'world']);
+  assert.ok(rows.every((line) => line.current));
+  assert.deepEqual(rows.map((line) => line.continuation), [false, true, true]);
+});
+
+test('彩蛋歌词模式只显示当前行及其翻译', () => {
+  const lines = [
+    { timeMs: 1000, text: '当前行', translation: 'current line' },
+    { timeMs: 2000, text: '未来行', translation: 'future line' }
+  ];
+  assert.deepEqual(
+    playbackLyricRows(lines, 1500, 6, true, 80, true).map((line) => line.text),
+    ['当前行', 'current line']
+  );
+  assert.deepEqual(playbackLyricRows(lines, 500, 6, true, 80, true), []);
 });
 
 test('未播放的原文和翻译使用相同的颜色角色', () => {

@@ -46,6 +46,7 @@ function harness(overrides = {}) {
       spawnCalls.push({ command, args, options });
       return child;
     },
+    guardProcess() {},
     connectIpc() {
       queueMicrotask(() => socket.emit('connect'));
       return socket;
@@ -77,6 +78,8 @@ test('starts persistent mpv and sends JSON IPC commands', async () => {
   await controller.stop();
   const commands = socket.writes.map((line) => JSON.parse(line).command);
   assert.deepEqual(commands, [
+    ['observe_property', 1, 'pause'],
+    ['observe_property', 2, 'time-pos'],
     ['set_property', 'volume', 80],
     ['loadfile', 'https://example.test/a.mp3', 'replace'],
     ['seek', 2.5, 'absolute+exact'],
@@ -108,6 +111,7 @@ test('waits for file-loaded before seeking and ignores replaced-file eof', async
   const ended = [];
   const { controller, socket } = harness({ onEnd: (_event, generation) => ended.push(generation) });
   await controller.initialize();
+  socket.writes.length = 0;
   socket.autoRespond = false;
   const loading = controller.load('https://example.test/next.mp3', { positionMs: 5000, volume: 70 });
 
@@ -134,11 +138,34 @@ test('waits for file-loaded before seeking and ignores replaced-file eof', async
 test('rejects failed mpv command responses', async () => {
   const { controller, socket } = harness();
   await controller.initialize();
+  socket.writes.length = 0;
   socket.autoRespond = false;
   const pausing = controller.pause();
   const request = JSON.parse(socket.writes[0]);
   socket.emit('data', Buffer.from(`${JSON.stringify({ request_id: request.request_id, error: 'property unavailable' })}\n`));
   await assert.rejects(pausing, /property unavailable/);
+});
+
+test('向 mpv 写入解析后的媒体标题并接收播放器暂停与跳转状态', async () => {
+  const states = [];
+  const positions = [];
+  const { controller, socket } = harness({
+    onPauseChange: (paused) => states.push(paused),
+    onPositionChange: (seconds, _event, generation) => positions.push({ seconds, generation })
+  });
+  await controller.initialize();
+  socket.emit('data', Buffer.from('{"event":"property-change","name":"pause","data":true}\n'));
+  socket.emit('data', Buffer.from('{"event":"property-change","name":"pause","data":false}\n'));
+  socket.emit('data', Buffer.from('{"event":"property-change","name":"volume","data":50}\n'));
+  socket.emit('data', Buffer.from('{"event":"property-change","name":"time-pos","data":42.5}\n'));
+  await controller.load('https://example.test/opaque', {
+    metadata: { name: '歌曲名', artists: ['歌手甲', '歌手乙'], album: '专辑名' }
+  });
+  const commands = socket.writes.map((line) => JSON.parse(line).command);
+  assert.deepEqual(states, [true, false]);
+  assert.deepEqual(positions, [{ seconds: 42.5, generation: 0 }]);
+  assert.ok(commands.some((command) => command[0] === 'set_property'
+    && command[1] === 'force-media-title' && command[2] === '歌曲名 — 歌手甲/歌手乙'));
 });
 
 test('reports invalid JSON and unexpected process exit', async () => {

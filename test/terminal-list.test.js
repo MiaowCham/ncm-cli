@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { selectTerminalList, terminalListAction, terminalListViewport } from '../src/terminal-list.js';
+import { readTerminalKey, selectTerminalList, terminalListAction, terminalListViewport } from '../src/terminal-list.js';
 
 test('终端列表视窗始终包含选择项', () => {
   assert.deepEqual(terminalListViewport(20, 0, 5, 0), { start: 0, end: 5, selectedIndex: 0 });
@@ -19,10 +19,64 @@ test('终端列表解析方向键、滚轮、确认和返回', () => {
   assert.deepEqual(terminalListAction('\x1b[<64;10;5m'), { type: 'ignore' });
   assert.deepEqual(terminalListAction('\r'), { type: 'select' });
   assert.deepEqual(terminalListAction(' '), { type: 'alternate' });
+  assert.deepEqual(terminalListAction('d'), { type: 'detail' });
   assert.deepEqual(terminalListAction('q'), { type: 'cancel' });
   assert.deepEqual(terminalListAction('\x1b'), { type: 'cancel' });
   assert.deepEqual(terminalListAction('\x03'), { type: 'interrupt' });
   assert.deepEqual(terminalListAction('x'), { type: 'ignore' });
+});
+
+test('终端列表可为详情快捷键返回当前选择项', async () => {
+  class FakeInput extends EventEmitter {
+    isTTY = true; isRaw = false; paused = false;
+    setRawMode(value) { this.isRaw = value; }
+    pause() { this.paused = true; }
+    resume() { this.paused = false; }
+    isPaused() { return this.paused; }
+  }
+  class FakeOutput extends EventEmitter {
+    isTTY = true; rows = 8; columns = 80;
+    write() { return true; }
+  }
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const selection = selectTerminalList({
+    rl: { pause() {}, resume() {}, write() {} },
+    items: ['歌曲'], detailAction: 'detail', input, output
+  });
+  setImmediate(() => input.emit('data', Buffer.from('d')));
+  assert.deepEqual(await selection, { index: 0, action: 'detail' });
+});
+
+test('详情菜单按键无需回车即可响应', async () => {
+  class FakeInput extends EventEmitter {
+    isTTY = true; isRaw = false; paused = false;
+    setRawMode(value) { this.isRaw = value; }
+    pause() { this.paused = true; }
+    resume() { this.paused = false; }
+    isPaused() { return this.paused; }
+  }
+  class FakeOutput extends EventEmitter {
+    isTTY = true; chunks = [];
+    write(chunk) { this.chunks.push(String(chunk)); return true; }
+  }
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  let resizeCount = 0;
+  const result = readTerminalKey({
+    rl: { pause() {}, resume() {}, write() {} }, prompt: '[p]播放 > ', keys: ['p', 'q'], input, output,
+    onResize: () => { resizeCount += 1; }
+  });
+  setImmediate(() => {
+    output.emit('resize');
+    setImmediate(() => input.emit('data', Buffer.from('p')));
+  });
+  assert.equal(await result, 'p');
+  assert.match(output.chunks.join(''), /\[p\]播放 > /);
+  assert.doesNotMatch(output.chunks.join(''), /> p/);
+  assert.equal(input.isRaw, false);
+  assert.equal(resizeCount, 1);
+  assert.equal(output.listenerCount('resize'), 0);
 });
 
 test('终端列表仅在启用备用动作时允许空格确认', async () => {
