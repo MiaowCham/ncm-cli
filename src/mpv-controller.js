@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { guardPlayerProcess } from './process-guardian.js';
 
 export function createMpvIpcPath({ platform = process.platform, pid = process.pid, uuid = randomUUID() } = {}) {
   const name = `ncm-cli-mpv-${pid}-${uuid}`;
@@ -16,6 +17,7 @@ export function createMpvController({
   platform = process.platform,
   ipcPath = createMpvIpcPath({ platform }),
   spawnProcess = spawn,
+  guardProcess = guardPlayerProcess,
   connectIpc = (socketPath) => net.createConnection(socketPath),
   delay = wait,
   connectTimeoutMs = 3000,
@@ -23,6 +25,8 @@ export function createMpvController({
   commandTimeoutMs = 3000,
   loadTimeoutMs = 15000,
   onEnd = () => {},
+  onPauseChange = () => {},
+  onPositionChange = () => {},
   onError = () => {}
 } = {}) {
   let child = null;
@@ -41,6 +45,15 @@ export function createMpvController({
   };
 
   const handleMessage = (message) => {
+    if (message?.event === 'property-change' && message.name === 'pause' && typeof message.data === 'boolean') {
+      onPauseChange(message.data, message);
+      return;
+    }
+    if (message?.event === 'property-change' && message.name === 'time-pos'
+        && Number.isFinite(message.data) && message.data >= 0) {
+      onPositionChange(message.data, message, loadGeneration);
+      return;
+    }
     if (message?.request_id != null) {
       const pending = pendingRequests.get(message.request_id);
       if (pending) {
@@ -152,6 +165,7 @@ export function createMpvController({
         '--really-quiet',
         `--input-ipc-server=${ipcPath}`
       ], { stdio: 'ignore', windowsHide: true });
+      guardProcess(child, { command, marker: ipcPath });
       child.once('error', (error) => {
         if (!initialized) initializationFailure = error;
         else reportError(error);
@@ -172,6 +186,8 @@ export function createMpvController({
           const connectedSocket = await connectOnce(Math.max(1, deadline - Date.now()));
           attachSocket(connectedSocket);
           initialized = true;
+          await send(['observe_property', 1, 'pause']);
+          await send(['observe_property', 2, 'time-pos']);
           return;
         } catch (error) {
           lastError = error;
@@ -236,7 +252,7 @@ export function createMpvController({
     get available() { return initialized && !closing; },
     get generation() { return loadGeneration; },
     initialize,
-    async load(url, { positionMs = 0, volume = 100 } = {}) {
+    async load(url, { positionMs = 0, volume = 100, metadata = {} } = {}) {
       if (!url) throw new Error('播放地址不能为空');
       const generation = ++loadGeneration;
       if (pendingLoad) {
@@ -251,7 +267,12 @@ export function createMpvController({
         pendingLoad = { generation, resolve, reject, timer };
       });
       try {
+        const title = String(metadata.title || metadata.name || '').trim();
+        const artists = Array.isArray(metadata.artists) ? metadata.artists.join('/') : metadata.artist;
+        const album = String(metadata.album || '').trim();
+        const mediaTitle = [title, String(artists || '').trim()].filter(Boolean).join(' — ') || title;
         await send(['set_property', 'volume', Math.min(100, Math.max(0, Number(volume) || 0))]);
+        if (mediaTitle) await send(['set_property', 'force-media-title', mediaTitle]);
         await send(['loadfile', String(url), 'replace']);
         await loaded;
         if (generation !== loadGeneration) throw new Error('mpv 加载已过期');

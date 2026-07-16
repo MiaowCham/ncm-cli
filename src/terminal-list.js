@@ -27,6 +27,7 @@ export function terminalListAction(buffer) {
   if (key === 'q' || key === 'Q' || key === '\x1b') return { type: 'cancel' };
   if (key.includes('\r') || key.includes('\n')) return { type: 'select' };
   if (key === ' ') return { type: 'alternate' };
+  if (key === 'd' || key === 'D') return { type: 'detail' };
   const wheel = /\x1b\[<(\d+);\d+;\d+([Mm])/.exec(key);
   if (wheel) {
     const button = Number(wheel[1]);
@@ -63,6 +64,75 @@ function restoreRawInput(stream, rl, state, onData) {
   }
 }
 
+export async function readTerminalKey({
+  rl,
+  prompt,
+  keys,
+  signal,
+  onInterrupt,
+  onResize,
+  input = process.stdin,
+  output = process.stdout
+}) {
+  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== 'function') return null;
+  const allowed = new Set(keys.map((key) => key.toLowerCase()));
+  const promptText = () => typeof prompt === 'function' ? String(prompt()) : String(prompt);
+  let settle;
+  const completion = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  let finished = false;
+  const finish = (value) => {
+    if (finished) return;
+    finished = true;
+    settle.resolve(value);
+  };
+  const onData = (buffer) => {
+    const value = buffer.toString('utf8');
+    if (value === '\x03') {
+      onInterrupt?.();
+      return;
+    }
+    if (value === '\x1b' && allowed.has('q')) return finish('q');
+    const key = value.toLowerCase();
+    if (allowed.has(key)) finish(key);
+  };
+  const abort = () => {
+    if (finished) return;
+    finished = true;
+    settle.reject(signal.reason || new DOMException('操作已取消', 'AbortError'));
+  };
+  const inputState = {
+    wasRaw: Boolean(input.isRaw),
+    wasPaused: input.isPaused(),
+    listeners: input.listeners('data')
+  };
+  let inputAttached = false;
+  let resizeGeneration = 0;
+  const resize = () => {
+    const generation = ++resizeGeneration;
+    Promise.resolve(onResize?.()).then(() => {
+      if (!finished && generation === resizeGeneration) output.write(promptText());
+    }).catch(() => {});
+  };
+  try {
+    rl?.pause();
+    for (const listener of inputState.listeners) input.removeListener('data', listener);
+    input.on('data', onData);
+    inputAttached = true;
+    input.setRawMode(true);
+    input.resume();
+    output.write(promptText());
+    if (onResize) output.on('resize', resize);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    const result = await completion;
+    return result;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    if (onResize) output.removeListener('resize', resize);
+    if (inputAttached) restoreRawInput(input, rl, inputState, onData);
+  }
+}
+
 export async function selectTerminalList({
   rl,
   items,
@@ -70,6 +140,7 @@ export async function selectTerminalList({
   title = '请选择',
   hint = '↑/↓ 或滚轮选择  Enter 查看  q/Esc 返回',
   alternateAction = null,
+  detailAction = null,
   itemText = (item) => String(item),
   signal,
   onInterrupt,
@@ -111,6 +182,7 @@ export async function selectTerminalList({
     else if (action.type === 'cancel') finish(null);
     else if (action.type === 'select') finish(selectedIndex);
     else if (action.type === 'alternate' && alternateAction) finish({ index: selectedIndex, action: alternateAction });
+    else if (action.type === 'detail' && detailAction) finish({ index: selectedIndex, action: detailAction });
     else if (action.type === 'move') {
       selectedIndex = clamp(selectedIndex + action.delta, 0, items.length - 1);
       render();

@@ -66,7 +66,7 @@ export function playlistExportContent(playlist, tracks, format) {
 export function parsePlaylistExportFormatSelection(raw) {
   const value = String(raw ?? '').trim();
   if (/^(?:q|quit|返回)$/i.test(value)) return { quit: true };
-  const match = value.match(/^([1-4])(?:\s*(?:>|\|)\s*(.+))?$/);
+  const match = value.match(/^([1-4])(?:\s*(?:>|\|)\s*(.*))?$/);
   if (!match) return null;
   return {
     quit: false,

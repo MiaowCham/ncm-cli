@@ -1,7 +1,5 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import chalk from 'chalk';
 import qrcode from 'qrcode-terminal';
 import { commandCompleter } from './completion.js';
@@ -9,24 +7,35 @@ import { NcmApi, normalizeApiBaseUrl } from './api.js';
 import { clearCookie, loadCookie, saveCookie } from './cookie-store.js';
 import { mergeTranslatedLrc, plainLyrics } from './lyrics.js';
 import { Logger } from './logger.js';
-import { closeRetainedSmtc, playWithProgress, tryRenderImage } from './media.js';
+import { closeRetainedSmtc, findPlayer, playerBackendLabel, playerCommandsForBackend, playWithProgress, tryRenderImage } from './media.js';
 import { parsePlaylistExportFormatSelection, playlistExportContent } from './playlist-export.js';
-import { selectTerminalList } from './terminal-list.js';
+import { readTerminalKey, selectTerminalList } from './terminal-list.js';
+import { writeExport } from './output-file.js';
+import { cleanupStalePlayerSessions } from './player-registry.js';
 import {
   loadSettings, saveSettings, MIN_LYRIC_OFFSET_MS, MAX_LYRIC_OFFSET_MS
 } from './settings-store.js';
 import {
-  normalizeCookie, parseIdCommand, parseLoginCommand, parseLyricAction,
+  normalizeCookie, parseIdCommand, parseLoginCommand,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
-  parseNumberSelection, parseOffsetCommand, parseSmtcOffsetCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
+  parseNumberSelection, parseOffsetCommand, parseSmtcOffsetCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
   parseListPlaylistsCommand, parsePlaylistCommand,
   parseApiCommand,
-  QUALITY_LEVELS
+  IMAGE_PROTOCOLS, PLAYER_BACKENDS, QUALITY_LEVELS
 } from './parsers.js';
 
 const QUALITY_LABELS = Object.freeze({
   standard: '标准', higher: '较高', exhigh: '极高', lossless: '无损', hires: 'Hi-Res',
   jyeffect: '高清环绕声', sky: '沉浸环绕声', dolby: '杜比全景声', jymaster: '超清母带'
+});
+
+const PLAYER_BACKEND_LABELS = Object.freeze({
+  auto: '自动选择', mpv: 'mpv', vlc: 'VLC', ffplay: 'ffplay'
+});
+
+const IMAGE_PROTOCOL_LABELS = Object.freeze({
+  auto: '自动检测', sixel: 'SIXEL（Windows Terminal 1.22+）', kitty: 'Kitty',
+  iterm2: 'iTerm2', symbols: 'chafa 字符图', ansi: 'ANSI 真彩字符', none: '不显示图片'
 });
 
 function isAbortError(error) {
@@ -51,24 +60,22 @@ ${chalk.bold('命令')}
   /login <cookie>                         保存并使用已有 Cookie
   /login status                           查看服务端验证的登录状态
   /signout                                退出登录并清除本地 Cookie
-  /quality                                查看并选择播放音质
-  /quality <level>                        直接设置播放音质
-  /offset                                 查看并设置播放时间偏移
-  /offset <毫秒>                          直接设置播放时间偏移（默认 2000）
-  /smtcoffset                             查看并设置 SMTC 额外偏移
-  /smtcoffset <毫秒>                      直接设置 SMTC 额外偏移（默认 0）
-  /api                                    查看并更换 API 地址
-  /api <url>                              直接更换 API 地址
+  /quality [level]                        查看、选择或直接设置播放音质
+  /player [auto|mpv|vlc|ffplay]           查看、选择或指定播放器后端
+  /image [协议]                           查看、选择或指定终端图片协议
+  /offset [毫秒]                          查看或设置播放时间偏移（默认 2000）
+  /smtcoffset [毫秒]                      查看或设置 SMTC 额外偏移（默认 0）
+  /api [url]                              查看或更换 API 地址
   /clear                                  清空终端并返回搜索
   /help                                   显示帮助
   /quit                                   退出程序
 
-歌词命令、搜索结果和格式选项均支持 ${chalk.cyan('> 文件名.lrc')} 或 ${chalk.cyan('| 文件名.lrc')}。
+歌词命令、搜索结果和后续格式选项支持 ${chalk.cyan('> 文件名.lrc')} 或 ${chalk.cyan('| 文件名.lrc')}。
 音质 level：${QUALITY_LEVELS.join('、')}。
-歌曲详情：p 播放，l 歌词，u 播放链接和封面链接，q 返回。
-歌单详情：p 播放，e 选择格式导出列表，u 歌单链接和封面链接，q 返回。
+歌曲详情：p 播放，l 歌词导出，u 播放链接和封面链接，q 返回。
+歌单详情：p 播放，l 滚动选择歌曲，e 选择格式导出列表，u 歌单链接和封面链接，q 返回。
 播放页：q 停止返回，r 刷新页面，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，Ctrl+↑/↓ 调整偏移 50ms，t 开关翻译。
-歌单播放：p 打开/关闭播放列表，Ctrl+←/→ 切换歌曲；列表中 ↑/↓ 选择、Enter 播放。
+歌单播放：p 打开/关闭播放列表，s 切换随机模式，l 切换循环模式，Ctrl+←/→ 切换歌曲；列表中 ↑/↓ 选择、Enter 播放。
 命令行：输入斜杠命令或参数前缀后按 Tab 自动补全。
 `);
 }
@@ -191,11 +198,26 @@ function delay(ms, signal) {
   });
 }
 
-async function showSong(song, signal) {
+export function songLyricPreview(lyrics, capacity) {
+  const text = plainLyrics(lyrics?.original || '');
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.slice(0, Math.max(0, Math.floor(Number(capacity) || 0)));
+}
+
+async function showSong(song, signal, imageProtocol = 'auto', lyrics = null) {
   console.log();
-  if (song.cover) await tryRenderImage(song.cover, { signal, size: 'detail' });
+  const coverRows = song.cover
+    ? await tryRenderImage(song.cover, { signal, size: 'detail', protocol: imageProtocol })
+    : 0;
   console.log(chalk.bold.green(song.name));
   console.log(`歌手：${song.artists.join('/') || '未知'}\n专辑：${song.album}\nID：${song.id}\n时长：${formatDuration(song.durationMs)}`);
+  const previewCapacity = Math.max(0, (output.rows || 24) - coverRows - 10);
+  const preview = songLyricPreview(lyrics, Math.max(0, previewCapacity - 1));
+  if (preview.length) {
+    console.log(chalk.bold('\n歌词预览'));
+    for (const line of preview) console.log(chalk.white(line));
+    console.log(chalk.gray('...'));
+  }
 }
 
 async function refreshAuthState(api, authState, signal, logger) {
@@ -303,6 +325,66 @@ async function handleQuality(rl, api, settings, command, signal, logger) {
     if (/^q$/i.test(raw)) return;
     const level = /^\d+$/.test(raw) ? QUALITY_LEVELS[Number(raw) - 1] : raw;
     if (level && await setQuality(api, settings, level, logger)) return;
+  }
+}
+
+async function setPlayerBackend(settings, backend, logger) {
+  if (!PLAYER_BACKENDS.includes(backend)) {
+    console.log(`不支持的播放器后端：${backend}\n可用值：${PLAYER_BACKENDS.join('、')}`);
+    return false;
+  }
+  await saveSettings({ ...settings, playerBackend: backend });
+  settings.playerBackend = backend;
+  void logger.info('player_backend_changed', { playerBackend: backend });
+  const detected = findPlayer(playerCommandsForBackend(backend));
+  console.log(`播放器后端已设置为：${PLAYER_BACKEND_LABELS[backend]}（${backend}）`);
+  if (!detected) console.log('当前 PATH 中未找到该播放器，播放前请先安装并加入 PATH。');
+  return true;
+}
+
+async function handlePlayer(rl, settings, command, signal, logger) {
+  if (command.backend) {
+    await setPlayerBackend(settings, command.backend, logger);
+    return;
+  }
+  console.log(`当前播放器设置：${PLAYER_BACKEND_LABELS[settings.playerBackend]}（${settings.playerBackend}）`);
+  PLAYER_BACKENDS.forEach((backend, index) => {
+    console.log(`${String(index + 1).padStart(2)}. ${PLAYER_BACKEND_LABELS[backend]}（${backend}）`);
+  });
+  while (true) {
+    const raw = (await ask(rl, '选择序号或 backend，q 返回：', signal)).trim().toLowerCase();
+    if (/^q$/i.test(raw)) return;
+    const backend = /^\d+$/.test(raw) ? PLAYER_BACKENDS[Number(raw) - 1] : raw;
+    if (backend && await setPlayerBackend(settings, backend, logger)) return;
+  }
+}
+
+async function setImageProtocol(settings, protocol, logger) {
+  if (!IMAGE_PROTOCOLS.includes(protocol)) {
+    console.log(`不支持的图片协议：${protocol}\n可用值：${IMAGE_PROTOCOLS.join('、')}`);
+    return false;
+  }
+  await saveSettings({ ...settings, imageProtocol: protocol });
+  settings.imageProtocol = protocol;
+  void logger.info('image_protocol_changed', { imageProtocol: protocol });
+  console.log(`终端图片协议已设置为：${IMAGE_PROTOCOL_LABELS[protocol]}（${protocol}）`);
+  return true;
+}
+
+async function handleImage(rl, settings, command, signal, logger) {
+  if (command.protocol) {
+    await setImageProtocol(settings, command.protocol, logger);
+    return;
+  }
+  console.log(`当前终端图片协议：${IMAGE_PROTOCOL_LABELS[settings.imageProtocol]}（${settings.imageProtocol}）`);
+  IMAGE_PROTOCOLS.forEach((protocol, index) => {
+    console.log(`${String(index + 1).padStart(2)}. ${IMAGE_PROTOCOL_LABELS[protocol]}（${protocol}）`);
+  });
+  while (true) {
+    const raw = (await ask(rl, '选择序号或协议，q 返回：', signal)).trim().toLowerCase();
+    if (/^q$/i.test(raw)) return;
+    const protocol = /^\d+$/.test(raw) ? IMAGE_PROTOCOLS[Number(raw) - 1] : raw;
+    if (protocol && await setImageProtocol(settings, protocol, logger)) return;
   }
 }
 
@@ -461,26 +543,16 @@ async function useProvidedCookie(api, authState, raw, signal, logger) {
   printLoginStatus(authState);
 }
 
-async function writeLyrics(target, content) {
-  const file = path.resolve(process.cwd(), target.replace(/^['"]|['"]$/g, ''));
-  try {
-    await writeFile(file, `${content}\n`, { encoding: 'utf8', flag: 'wx' });
-  } catch (error) {
-    if (error.code === 'EEXIST') throw new Error(`目标文件已存在，未覆盖：${file}`);
-    throw error;
-  }
-  console.log(`歌词已写入：${file}`);
+async function writeLyrics(target, content, song, format) {
+  const file = await writeExport({
+    target, content, kind: 'lyrics', format, title: song.name, artists: song.artists
+  });
+  return file;
 }
 
-async function writePlaylist(target, content) {
-  const file = path.resolve(process.cwd(), target.replace(/^['"]|['"]$/g, ''));
-  try {
-    await writeFile(file, `${content}\n`, { encoding: 'utf8', flag: 'wx' });
-  } catch (error) {
-    if (error.code === 'EEXIST') throw new Error(`目标文件已存在，未覆盖：${file}`);
-    throw error;
-  }
-  console.log(`歌单列表已写入：${file}`);
+async function writePlaylist(target, content, playlist, format) {
+  const file = await writeExport({ target, content, kind: 'playlist', format, title: playlist.name });
+  return file;
 }
 
 function mergeOutputTargets(existing, selected) {
@@ -496,19 +568,23 @@ function lyricContent(lyrics, format) {
   throw new Error(`未知歌词格式：${format}`);
 }
 
-async function outputLyrics(api, song, format, outputFile, signal) {
+async function outputLyrics(api, song, format, outputFile, signal, { silent = false } = {}) {
   const lyrics = await api.lyrics(song.id, { signal });
   const content = lyricContent(lyrics, format);
   if (!content) {
     console.log(format === 'trans' ? '暂无翻译歌词。' : '暂无对应歌词。');
     return false;
   }
-  if (outputFile) await writeLyrics(outputFile, content);
+  if (outputFile !== null) {
+    const file = await writeLyrics(outputFile, content, song, format);
+    if (!silent) console.log(`歌词已写入：${file}`);
+    return { written: true, file };
+  }
   else console.log(`\n${content}`);
-  return true;
+  return { written: false, file: null };
 }
 
-async function lyricFormatMenu(rl, api, song, { outputFile = null, signal } = {}) {
+async function lyricFormatMenu(rl, api, song, { outputFile = null, signal, silent = false } = {}) {
   console.log(`
 歌词格式：
   1. 纯歌词（plain）
@@ -527,11 +603,12 @@ async function lyricFormatMenu(rl, api, song, { outputFile = null, signal } = {}
     let target;
     try {
       target = mergeOutputTargets(outputFile, selection.output);
+      if (outputFile === '' && !selection.output) target = '';
     } catch (error) {
       console.log(error.message);
       continue;
     }
-    return outputLyrics(api, song, selection.format, target, signal);
+    return outputLyrics(api, song, selection.format, target, signal, { silent });
   }
 }
 
@@ -558,6 +635,8 @@ async function playSong(api, song, context, rl, cachedLyrics = null) {
     translatedLyricSource: lyrics.translated,
     lyricOffsetMs: context.settings.lyricOffsetMs,
     smtcOffsetMs: context.settings.smtcOffsetMs,
+    playerBackend: context.settings.playerBackend,
+    imageProtocol: context.settings.imageProtocol,
     signal,
     logger,
     rl,
@@ -571,28 +650,58 @@ async function playSong(api, song, context, rl, cachedLyrics = null) {
 
 async function songMenu(rl, api, song, context) {
   const { signal, authState } = context;
-  await showSong(song, signal);
   let cachedLyrics = null;
+  try {
+    cachedLyrics = await api.lyrics(song.id, { signal });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    void context.logger.warn('song_lyrics_preview_failed', { songId: song.id, error });
+  }
+  let linksVisible = false;
+  let songLinks = [];
   while (true) {
-    const action = (await ask(rl, chalk.yellow('\n[p]播放 [l]歌词 [u]播放链接 [q]返回 > '), signal)).trim();
-    if (/^(?:q|b|back|返回)$/i.test(action)) return;
-    const lyricAction = parseLyricAction(action);
-    if (lyricAction) {
-      await lyricFormatMenu(rl, api, song, { outputFile: lyricAction.output, signal });
-      continue;
+    const page = await openDetailPage(
+      rl,
+      () => showSong(song, signal, context.settings.imageProtocol, cachedLyrics),
+      () => detailFooterPrompt(
+        chalk.yellow('[p]播放 [l]歌词导出 [u]播放链接 [q]返回 > '),
+        linksVisible ? songLinks : []
+      ),
+      ['p', 'l', 'u', 'q'],
+      context
+    );
+    const { action } = page;
+    try {
+      if (/^(?:q|b|back|返回)$/i.test(action)) return;
+      if (/^(?:l|lyric|歌词)$/i.test(action)) {
+        linksVisible = false;
+        prepareDetailOverlay(8);
+        const result = await lyricFormatMenu(rl, api, song, { outputFile: '', signal, silent: true });
+        if (result?.written) await showDetailNotice(`歌词已写入：${result.file}`, context);
+        continue;
+      }
+      if (/^(?:u|url|链接)$/i.test(action)) {
+        if (linksVisible) linksVisible = false;
+        else {
+          const result = await api.songUrl(song.id, { signal });
+          songLinks = [
+            result?.url ? `播放链接：${result.url}` : unavailableUrlMessage(result, authState),
+            song.cover ? `封面链接：${song.cover}` : '无封面链接'
+          ];
+          linksVisible = true;
+        }
+        continue;
+      }
+      if (/^(?:p|play|播放)$/i.test(action)) {
+        linksVisible = false;
+        page.close();
+        cachedLyrics = await playSong(api, song, context, rl, cachedLyrics);
+        continue;
+      }
+      console.log('未知选项，请输入 p、l、u 或 q。');
+    } finally {
+      page.close();
     }
-    if (/^(?:u|url|链接)$/i.test(action)) {
-      const result = await api.songUrl(song.id, { signal });
-      if (result?.url) console.log(`播放链接：${result.url}`);
-      else console.log(unavailableUrlMessage(result, authState));
-      console.log(song.cover ? `封面链接：${song.cover}` : '无封面链接');
-      continue;
-    }
-    if (/^(?:p|play|播放)$/i.test(action)) {
-      cachedLyrics = await playSong(api, song, context, rl, cachedLyrics);
-      continue;
-    }
-    console.log('未知选项，请输入 p、l、u 或 q。');
   }
 }
 
@@ -612,16 +721,70 @@ function playlistLink(id) {
   return `https://music.163.com/#/playlist?id=${id}`;
 }
 
-function parsePlaylistExportAction(raw) {
-  const match = raw.match(/^(?:e|export|导出)(?:\s*(?:>|\|)\s*(.+))?$/i);
-  if (!match) return null;
-  return { output: match[1]?.trim() || null };
+async function readDetailAction(rl, prompt, keys, context, onResize) {
+  if (input.isTTY && output.isTTY) {
+    return readTerminalKey({
+      rl, prompt, keys, signal: context.signal,
+      onResize,
+      onInterrupt: () => context.shutdown('detail_ctrl_c')
+    });
+  }
+  const text = typeof prompt === 'function' ? prompt() : prompt;
+  return (await ask(rl, text, context.signal)).trim().toLowerCase();
 }
 
-const PLAYLIST_RETURN_HOME = 'home';
+async function openDetailPage(rl, render, prompt, keys, context) {
+  const tty = input.isTTY && output.isTTY;
+  if (tty) output.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    if (tty) output.write('\x1b[?25h\x1b[?1049l');
+  };
+  try {
+    const redraw = async () => {
+      if (tty) output.write('\x1b[2J\x1b[H');
+      await render();
+    };
+    await redraw();
+    const action = await readDetailAction(rl, prompt, keys, context, redraw);
+    return { action, close, tty };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+export function detailOverlaySequence(rows, reservedRows) {
+  const height = Math.max(1, Number(rows) || 24);
+  const startRow = Math.max(1, height - Math.max(1, reservedRows) + 1);
+  return `\x1b[${startRow};1H\x1b[0J`;
+}
+
+function prepareDetailOverlay(reservedRows) {
+  if (!input.isTTY || !output.isTTY) return;
+  // 固定顶部内容，只从屏幕底部向上清除操作区；后续输出会替换这些行，
+  // 而不是通过新增行把详情内容滚出屏幕。
+  output.write(detailOverlaySequence(output.rows, reservedRows));
+}
+
+async function showDetailNotice(message, context) {
+  prepareDetailOverlay(2);
+  const maximum = Math.max(1, (output.columns || 80) - 1);
+  const text = String(message);
+  console.log(chalk.green(text.length > maximum ? `${text.slice(0, maximum - 1)}…` : text));
+  await delay(1500, context.signal);
+}
+
+export function detailFooterPrompt(prompt, lines = [], rows = output.rows, columns = output.columns) {
+  const footer = lines.map((line) => String(line).slice(0, Math.max(1, columns || 80)));
+  const height = Math.max(1, rows || 24);
+  return `${detailOverlaySequence(height, footer.length + 1)}${prompt}${footer.length ? `\n${footer.join('\n')}` : ''}`;
+}
 
 export function playlistPlaybackDestination(playback) {
-  return playback === 'quit' ? PLAYLIST_RETURN_HOME : null;
+  return null;
 }
 
 async function playPlaylist(api, playlist, tracks, startIndex, context) {
@@ -697,6 +860,8 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     ...initial,
     lyricOffsetMs: context.settings.lyricOffsetMs,
     smtcOffsetMs: context.settings.smtcOffsetMs,
+    playerBackend: context.settings.playerBackend,
+    imageProtocol: context.settings.imageProtocol,
     playlist: { name: playlist.name, tracks, currentIndex: activeIndex },
     signal: context.signal,
     logger: context.logger,
@@ -718,12 +883,16 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     }
   });
 
-  const destination = playlistPlaybackDestination(playback);
-  if (destination) return destination;
+  playlistPlaybackDestination(playback);
   if (playback === 'stopped' || playback === 'smtc_stop' || playback?.type === 'playlist_quit') return;
   if (unavailable.size === tracks.length) {
     console.log('歌单中没有可用的播放链接，可能受会员、版权或地区限制。');
   }
+}
+
+export function playlistPreviewLimit(rows, coverRows = 0, hasDescription = false) {
+  const available = Math.floor(Number(rows) || 24) - Math.max(0, coverRows) - 10 - (hasDescription ? 1 : 0);
+  return Math.max(1, available);
 }
 
 async function playlistMenu(rl, api, id, context) {
@@ -734,42 +903,101 @@ async function playlistMenu(rl, api, id, context) {
     fullTracks ||= await api.playlistTracks(id, { signal: context.signal });
     return fullTracks;
   };
-  console.log();
   const cover = playlist.cover || playlist.coverImgUrl;
-  if (cover) await tryRenderImage(cover, { signal: context.signal, size: 'detail' });
-  console.log(chalk.bold.green(playlist.name || `歌单 ${id}`));
-  console.log(`创建者：${playlistCreatorName(playlist)}`);
-  console.log(`歌曲数：${playlist.trackCount ?? previewTracks.length}`);
-  console.log(`播放量：${formatCount(playlist.playCount)}`);
-  console.log(`ID：${playlist.id || id}`);
-  if (playlist.description) console.log(`描述：${String(playlist.description).replace(/\s+/g, ' ').trim()}`);
-  console.log(chalk.bold('\n歌曲预览'));
-  previewTracks.slice(0, 15).forEach((song, index) => {
-    console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${song.name} — ${song.artists?.join('/') || '未知歌手'} ${chalk.gray(`[${song.id}]`)}`);
-  });
-  const remaining = Math.max(0, (playlist.trackCount ?? previewTracks.length) - 15);
-  if (remaining) console.log(chalk.gray(`……另有 ${remaining} 首`));
+  let linksVisible = false;
+  const playlistLinks = [
+    `歌单链接：${playlistLink(playlist.id || id)}`,
+    cover ? `封面链接：${cover}` : '无封面链接'
+  ];
+  const renderDetail = async () => {
+    console.log();
+    const coverRows = cover ? await tryRenderImage(cover, {
+      signal: context.signal, size: 'detail', protocol: context.settings.imageProtocol
+    }) : 0;
+    console.log(chalk.bold.green(playlist.name || `歌单 ${id}`));
+    console.log(`创建者：${playlistCreatorName(playlist)}`);
+    console.log(`歌曲数：${playlist.trackCount ?? previewTracks.length}`);
+    console.log(`播放量：${formatCount(playlist.playCount)}`);
+    console.log(`ID：${playlist.id || id}`);
+    if (playlist.description) console.log(`描述：${String(playlist.description).replace(/\s+/g, ' ').trim()}`);
+    console.log(chalk.bold('\n歌曲预览'));
+    const limit = Math.max(1, playlistPreviewLimit(output.rows, coverRows, Boolean(playlist.description))
+      - (linksVisible ? 2 : 0));
+    previewTracks.slice(0, limit).forEach((song, index) => {
+      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${song.name} — ${song.artists?.join('/') || '未知歌手'} ${chalk.gray(`[${song.id}]`)}`);
+    });
+    const remaining = Math.max(0, (playlist.trackCount ?? previewTracks.length) - Math.min(limit, previewTracks.length));
+    if (remaining) console.log(chalk.gray(`……另有 ${remaining} 首`));
+  };
 
   while (true) {
-    const raw = (await ask(
+    const page = await openDetailPage(
       rl,
-      chalk.yellow('\n[p]播放 [e]导出列表 [u]歌单链接 [q]主页 > '),
-      context.signal
-    )).trim();
-    if (/^(?:q|b|back|返回)$/i.test(raw)) return PLAYLIST_RETURN_HOME;
+      renderDetail,
+      () => detailFooterPrompt(
+        chalk.yellow('[p]播放 [l]歌曲列表 [e]导出列表 [u]歌单链接 [q]返回 > '),
+        linksVisible ? playlistLinks : []
+      ),
+      ['p', 'l', 'e', 'u', 'q'],
+      context
+    );
+    const { action: raw } = page;
+    try {
+    if (/^(?:q|b|back|返回)$/i.test(raw)) return 'back';
     if (/^(?:u|url|链接)$/i.test(raw)) {
-      console.log(`歌单链接：${playlistLink(playlist.id || id)}`);
-      console.log(cover ? `封面链接：${cover}` : '无封面链接');
+      linksVisible = !linksVisible;
       continue;
     }
     if (/^(?:p|play|播放)$/i.test(raw)) {
+      linksVisible = false;
+      page.close();
       const tracks = await loadFullTracks();
-      const destination = await playPlaylist(api, playlist, tracks, 0, { ...context, rl });
-      if (destination === PLAYLIST_RETURN_HOME) return destination;
+      await playPlaylist(api, playlist, tracks, 0, { ...context, rl });
       continue;
     }
-    const exportAction = parsePlaylistExportAction(raw);
-    if (exportAction) {
+    if (/^(?:l|list|列表)$/i.test(raw)) {
+      linksVisible = false;
+      page.close();
+      const tracks = await loadFullTracks();
+      let selected;
+      let selectedIndex = 0;
+      if (input.isTTY && output.isTTY) {
+        while (true) {
+          const result = await selectTerminalList({
+            rl,
+            items: tracks,
+            initialIndex: selectedIndex,
+            title: `${playlist.name || `歌单 ${id}`} - 歌曲列表`,
+            hint: '↑/↓ 或滚轮选择  Enter/空格 播放  d 详情  q/Esc 返回',
+            alternateAction: 'play',
+            detailAction: 'detail',
+            itemText: (song, index) => `${String(index + 1).padStart(2)}. ${song.name} — ${song.artists?.join('/') || '未知歌手'}`,
+            signal: context.signal,
+            onInterrupt: () => context.shutdown('playlist_tracks_ctrl_c')
+          });
+          if (result === null) break;
+          selectedIndex = typeof result === 'number' ? result : result.index;
+          if (result?.action === 'detail') {
+            const detail = await api.songDetail(tracks[selectedIndex].id, { signal: context.signal });
+            await songMenu(rl, api, detail, context);
+            continue;
+          }
+          selected = selectedIndex;
+          break;
+        }
+      } else {
+        tracks.forEach((song, index) => console.log(`${index + 1}. ${song.name} — ${song.artists?.join('/') || '未知歌手'}`));
+        const rawSelection = (await ask(rl, '选择序号播放，q 返回：', context.signal)).trim();
+        if (!/^q$/i.test(rawSelection)) selected = Number(rawSelection) - 1;
+      }
+      if (Number.isInteger(selected) && selected >= 0 && selected < tracks.length) {
+        await playPlaylist(api, playlist, tracks, selected, { ...context, rl });
+      }
+      continue;
+    }
+    if (/^(?:e|export|导出)$/i.test(raw)) {
+      linksVisible = false;
+      prepareDetailOverlay(7);
       let selection = null;
       while (!selection) {
         console.log(`
@@ -779,37 +1007,28 @@ async function playlistMenu(rl, api, id, context) {
   3  CSV
   4  TSV`);
         const selected = parsePlaylistExportFormatSelection(
-          await ask(rl, '选择格式（可追加 > 文件 或 | 文件，q 返回） > ', context.signal)
+          await ask(rl, '选择格式（可追加 > 路径 或 | 路径；省略路径则导出到当前目录，q 返回） > ', context.signal)
         );
         if (selected?.quit) break;
         if (!selected) {
           console.log('请选择 1、2、3、4，或输入 q 返回。');
           continue;
         }
-        if (exportAction.output && selected.output) {
-          console.log('已经在导出命令中指定输出文件，请勿在格式选项中重复指定。请重新选择格式。');
-          continue;
-        }
         selection = selected;
       }
       if (!selection) continue;
 
-      let target = selection.output || exportAction.output;
-      if (!target) {
-        console.log('已有文件不会被覆盖。');
-        const entered = (await ask(rl, '输出文件（q 返回） > ', context.signal)).trim();
-        if (/^q$/i.test(entered)) continue;
-        target = entered.replace(/^(?:>|\|)\s*/, '').trim();
-      }
-      if (!target) {
-        console.log('请指定输出文件。');
-        continue;
-      }
       const tracks = await loadFullTracks();
-      await writePlaylist(target, playlistExportContent(playlist, tracks, selection.format));
+      const file = await writePlaylist(
+        selection.output, playlistExportContent(playlist, tracks, selection.format), playlist, selection.format
+      );
+      await showDetailNotice(`歌单列表已写入：${file}`, context);
       continue;
     }
-    console.log('未知选项，请输入 p、e、u 或 q。');
+    console.log('未知选项，请输入 p、l、e、u 或 q。');
+    } finally {
+      page.close();
+    }
   }
 }
 
@@ -846,7 +1065,7 @@ async function listUserPlaylists(rl, api, context) {
       });
       if (selection === null) return;
       selectedIndex = selection;
-      if (await playlistMenu(rl, api, playlists[selectedIndex].id, context) === PLAYLIST_RETURN_HOME) return;
+      await playlistMenu(rl, api, playlists[selectedIndex].id, context);
       continue;
     }
     console.log(chalk.bold('\n我的歌单'));
@@ -861,7 +1080,7 @@ async function listUserPlaylists(rl, api, context) {
       continue;
     }
     selectedIndex = selection.index;
-    if (await playlistMenu(rl, api, playlists[selection.index].id, context) === PLAYLIST_RETURN_HOME) return;
+    await playlistMenu(rl, api, playlists[selection.index].id, context);
   }
 }
 
@@ -974,6 +1193,16 @@ async function resolveInput(rl, api, raw, context) {
     await handleQuality(rl, api, context.settings, quality, signal, logger);
     return;
   }
+  const playerCommand = parsePlayerCommand(raw);
+  if (playerCommand) {
+    await handlePlayer(rl, context.settings, playerCommand, signal, logger);
+    return;
+  }
+  const imageCommand = parseImageCommand(raw);
+  if (imageCommand) {
+    await handleImage(rl, context.settings, imageCommand, signal, logger);
+    return;
+  }
   if (parseSignoutCommand(raw)) {
     await handleSignout(api, authState, signal, logger);
     return;
@@ -1044,12 +1273,18 @@ export async function main(args = []) {
   };
   const onSigint = () => shutdown('SIGINT');
   const onSigterm = () => shutdown('SIGTERM');
+  const onSighup = () => shutdown('SIGHUP');
+  const onSigbreak = () => shutdown('SIGBREAK');
   process.once('SIGINT', onSigint);
   process.once('SIGTERM', onSigterm);
+  process.once('SIGHUP', onSighup);
+  if (process.platform === 'win32') process.once('SIGBREAK', onSigbreak);
 
   try {
     rl = createInterface({ input, output, completer: commandCompleter });
     rl.on('SIGINT', onSigint);
+    const stalePlayers = await cleanupStalePlayerSessions();
+    if (stalePlayers.cleaned) console.log(`已清理上次遗留的播放器：${stalePlayers.cleaned} 个`);
     const cookie = await loadCookie();
     const settings = await loadSettings();
     const startupApiCommand = args.length ? parseApiCommand(args.join(' ')) : null;
@@ -1083,6 +1318,8 @@ export async function main(args = []) {
 
     console.log(chalk.bold.cyan('NCM CLI 点歌台'));
     console.log(`API：${api.baseUrl}`);
+    const homePlayer = findPlayer(playerCommandsForBackend(settings.playerBackend));
+    console.log(`播放器：${playerBackendLabel(homePlayer?.command)}（设置：${settings.playerBackend}）`);
     printLoginStatus(authState);
     console.log(`日志：${logger.file}`);
     console.log('输入 /help 查看命令。');
@@ -1114,6 +1351,8 @@ export async function main(args = []) {
   } finally {
     process.removeListener('SIGINT', onSigint);
     process.removeListener('SIGTERM', onSigterm);
+    process.removeListener('SIGHUP', onSighup);
+    if (process.platform === 'win32') process.removeListener('SIGBREAK', onSigbreak);
     rl?.removeListener('SIGINT', onSigint);
     rl?.close();
     await closeRetainedSmtc();

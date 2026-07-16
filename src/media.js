@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import readline from 'node:readline';
 import { performance } from 'node:perf_hooks';
@@ -8,7 +9,9 @@ import supportsTerminalGraphics from 'supports-terminal-graphics';
 import { parseLrc } from './lyrics.js';
 import { createMpvController } from './mpv-controller.js';
 import { createSmtcBridge } from './smtc.js';
+import { createVlcController } from './vlc-controller.js';
 import { hasProcessExited } from './process-state.js';
+import { guardPlayerProcess } from './process-guardian.js';
 
 let cachedWindowsTerminalVersion;
 let retainedSmtcBridge = null;
@@ -56,9 +59,20 @@ export async function closeRetainedSmtc() {
   await bridge?.close();
 }
 
+export function resolveCommandExecutable(command, {
+  platform = process.platform, probe = spawnSync
+} = {}) {
+  const requested = platform === 'win32' && !/\.(?:exe|com|cmd|bat)$/i.test(command)
+    ? `${command}.exe`
+    : command;
+  const locator = platform === 'win32' ? 'where.exe' : 'which';
+  const result = probe(locator, [requested], { encoding: 'utf8', windowsHide: true });
+  if (result.status !== 0) return null;
+  return String(result.stdout || '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) || null;
+}
+
 function commandExists(command) {
-  const probe = process.platform === 'win32' ? 'where.exe' : 'which';
-  return spawnSync(probe, [command], { stdio: 'ignore' }).status === 0;
+  return Boolean(resolveCommandExecutable(command));
 }
 
 function compareVersions(left, right) {
@@ -102,21 +116,48 @@ export function supportsSixelEnvironment({
   return Boolean(detectedSixel);
 }
 
-export function imageProtocolOrder({ nativeGraphics = false, sixel = false, chafa = false } = {}) {
+export function imageProtocolOrder({ preference = 'auto', kitty = false, iterm2 = false, sixel = false, chafa = false } = {}) {
+  if (preference === 'none') return [];
+  if (preference !== 'auto') {
+    if (preference === 'kitty') return kitty ? ['kitty', 'ansi'] : ['ansi'];
+    if (preference === 'iterm2') return iterm2 ? ['iterm2', 'ansi'] : ['ansi'];
+    // 显式选择 SIXEL 时直接尝试编码。Windows Terminal 的版本探测可能因
+    // 进程权限或商店安装方式失败，用户选择不应再被自动探测结果否决。
+    if (preference === 'sixel') return chafa ? ['sixel', 'ansi'] : ['ansi'];
+    if (preference === 'symbols') return chafa ? ['symbols', 'ansi'] : ['ansi'];
+    return ['ansi'];
+  }
   const order = [];
-  if (nativeGraphics) order.push('native');
+  if (kitty) order.push('kitty');
+  if (iterm2) order.push('iterm2');
   if (sixel && chafa) order.push('sixel');
   if (chafa) order.push('symbols');
   order.push('ansi');
   return order;
 }
 
-export function findPlayer(commands = ['mpv', 'ffplay', 'vlc', 'cvlc']) {
+export function findPlayer(commands = ['mpv', 'vlc', 'cvlc', 'ffplay']) {
   const candidates = commands.map((command) => ({
     command,
+    executable: resolveCommandExecutable(command),
     args: (url, seconds, volume) => playerArguments(command, url, seconds, volume)
   }));
-  return candidates.find((item) => commandExists(item.command)) || null;
+  return candidates.find((item) => item.executable) || null;
+}
+
+export function playerBackendLabel(command, { persistent = ['mpv', 'vlc', 'cvlc'].includes(command) } = {}) {
+  if (!command) return '未找到';
+  if (command === 'mpv') return persistent ? 'mpv（JSON IPC）' : 'mpv（兼容模式）';
+  if (command === 'vlc' || command === 'cvlc') return persistent ? 'VLC（oldrc）' : 'VLC（兼容模式）';
+  if (command === 'ffplay') return 'ffplay（兼容模式）';
+  return String(command);
+}
+
+export function playerCommandsForBackend(backend = 'auto') {
+  if (backend === 'mpv') return ['mpv'];
+  if (backend === 'vlc') return ['vlc', 'cvlc'];
+  if (backend === 'ffplay') return ['ffplay'];
+  return ['mpv', 'vlc', 'cvlc', 'ffplay'];
 }
 
 export function playerArguments(command, url, seconds, volume = 100) {
@@ -150,6 +191,8 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
     return { type: 'ignore' };
   }
   if (key.toLowerCase() === 'p') return { type: 'toggle_playlist' };
+  if (key.toLowerCase() === 's') return { type: 'cycle_random_mode' };
+  if (key.toLowerCase() === 'l') return { type: 'cycle_loop_mode' };
   if (playlistOpen && key === '\u001b') return { type: 'close_playlist' };
   if (playlistOpen && (key === '\r' || key === '\n')) return { type: 'playlist_select', index: playlistSelection };
   if (key === ' ') return { type: 'toggle_pause' };
@@ -263,26 +306,43 @@ function truncateText(text, width) {
   return `${output}…`;
 }
 
-/** 按终端显示宽度换行；宽字符不会被拆成半个单元格。 */
+/** 按终端显示宽度换行；英文优先保持完整单词，中文与超长单词按字符宽度拆分。 */
 export function wrapTerminalText(text, width) {
   const safeWidth = Math.max(1, Math.floor(Number(width) || 1));
   const rows = [];
-  let row = '';
-  for (const character of String(text ?? '')) {
-    if (character === '\n') {
-      rows.push(row);
-      row = '';
-      continue;
+  const appendLongToken = (token) => {
+    let chunk = '';
+    for (const character of token) {
+      if (chunk && stringWidth(chunk) + stringWidth(character) > safeWidth) {
+        rows.push(chunk);
+        chunk = '';
+      }
+      chunk += character;
     }
-    const characterWidth = stringWidth(character);
-    if (row && stringWidth(row) + characterWidth > safeWidth) {
-      rows.push(row.trimEnd());
-      row = '';
+    return chunk;
+  };
+  const paragraphs = String(text ?? '').split('\n');
+  for (const paragraph of paragraphs) {
+    let row = '';
+    let pendingSpace = false;
+    const tokens = paragraph.match(/\s+|[^\s]+/gu) || [];
+    for (const token of tokens) {
+      if (/^\s+$/u.test(token)) {
+        pendingSpace = Boolean(row);
+        continue;
+      }
+      const prefix = row && pendingSpace ? ' ' : '';
+      if (stringWidth(`${row}${prefix}${token}`) <= safeWidth) {
+        row += `${prefix}${token}`;
+      } else {
+        if (row) rows.push(row);
+        row = stringWidth(token) <= safeWidth ? token : appendLongToken(token);
+      }
+      pendingSpace = false;
     }
-    // 极窄终端遇到比一列更宽的字符时仍应保留字符，而不是死循环或丢失。
-    row += character;
+    rows.push(row);
   }
-  if (row || !rows.length) rows.push(row.trimEnd());
+  if (!rows.length) rows.push('');
   return rows;
 }
 
@@ -350,13 +410,18 @@ export function attachLyricTranslations(originalLines, translatedLines) {
   }));
 }
 
-export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation) {
+export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation, width = Infinity, currentOnly = false) {
   if (capacity <= 0) return [];
-  const visible = lyricViewport(lines, elapsedMs, capacity);
+  const viewport = lyricViewport(lines, elapsedMs, capacity);
+  const visible = currentOnly ? viewport.filter((line) => line.current) : viewport;
   const rowsFor = (line, includeTranslation = true) => {
-    const rows = [{ text: line.text, played: line.played, current: line.current, translation: false }];
+    const wrap = (text, translation) => (Number.isFinite(width) ? wrapTerminalText(text, width) : [text])
+      .map((part, index) => ({
+        text: part, played: line.played, current: line.current, translation, continuation: index > 0
+      }));
+    const rows = wrap(line.text, false);
     if (includeTranslation && showTranslation && line.translation) {
-      rows.push({ text: line.translation, played: line.played, current: line.current, translation: true });
+      rows.push(...wrap(line.translation, true));
     }
     return rows;
   };
@@ -401,12 +466,68 @@ export function playlistViewport(tracks, selectedIndex, currentIndex, capacity) 
   };
 }
 
-export function playbackShortcutText({ playlistOpen = false, hasPlaylist = false } = {}) {
-  if (playlistOpen && hasPlaylist) {
-    return 'p/Esc 关闭歌单  ↑/↓ 选择  Enter 播放  Ctrl+←/→ 上/下一首  Ctrl+↑/↓ 偏移  r 刷新';
+export const RANDOM_MODES = ['off', 'random', 'shuffle'];
+export const LOOP_MODES = ['sequence', 'list', 'single'];
+
+export function shuffledPlaylistOrder(length, currentIndex, random = Math.random) {
+  const rest = Array.from({ length }, (_, index) => index).filter((index) => index !== currentIndex);
+  for (let index = rest.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [rest[index], rest[swap]] = [rest[swap], rest[index]];
   }
-  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译  r 刷新';
-  return hasPlaylist ? `${base}  p 歌单  Ctrl+←/→ 切歌` : base;
+  return length ? [currentIndex, ...rest] : [];
+}
+
+export function playbackShortcutText() {
+  return 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译  r 刷新';
+}
+
+export function playbackPlaylistModeText({ randomLabel, loopLabel, playlistOpen = false } = {}) {
+  const modes = `[s 随机：${randomLabel || '不随机'}]  [l 循环：${loopLabel || '顺序播放'}]`;
+  return playlistOpen
+    ? `${modes}  [p/Esc 关闭]  [↑/↓ 选择]  [Enter 播放]  [Ctrl+←/→ 切歌]`
+    : `${modes}  [p 歌单]  [Ctrl+←/→ 切歌]`;
+}
+
+export function playbackPlaylistModeRows(options = {}, width = 80) {
+  const safeWidth = Math.max(1, Math.floor(Number(width) || 1));
+  const segments = playbackPlaylistModeText(options).split(/\s{2,}/).filter(Boolean);
+  const rows = [];
+  let row = '';
+  for (const segment of segments) {
+    const candidate = row ? `${row}  ${segment}` : segment;
+    if (stringWidth(candidate) <= safeWidth) {
+      row = candidate;
+      continue;
+    }
+    if (row) rows.push(row);
+    if (stringWidth(segment) <= safeWidth) row = segment;
+    else {
+      rows.push(...wrapTerminalText(segment, safeWidth));
+      row = '';
+    }
+  }
+  if (row || !rows.length) rows.push(row);
+  return rows;
+}
+
+export function playbackProgressText({ bar, timeText, paused = false, columns = 80 } = {}) {
+  const width = Math.max(1, columns);
+  const state = paused ? '[已暂停]' : '';
+  const full = `[${bar}]${state ? ` ${state}` : ''} ${timeText}`;
+  if (stringWidth(full) <= width) return full;
+  if (paused) {
+    const compact = `[>] ${state}`;
+    if (stringWidth(compact) <= width) return compact;
+    if (stringWidth(state) <= width) return state;
+  }
+  return truncateText(full, width);
+}
+
+export function shouldSyncPlayerPosition(localMs, playerSeconds, thresholdMs = 750) {
+  const remoteMs = Number(playerSeconds) * 1000;
+  return Number.isFinite(remoteMs) && remoteMs >= 0
+    && Math.abs(remoteMs - Number(localMs || 0)) >= Math.max(0, thresholdMs);
 }
 
 async function waitForExit(child, timeoutMs = 1500) {
@@ -494,27 +615,34 @@ function renderDynamic({
   indicator,
   playlist,
   playlistOpen,
-  playlistSelection
+  playlistSelection,
+  playbackModeText,
+  currentLyricOnly = false
 }) {
   const columns = Math.max(1, process.stdout.columns || 80);
   const rows = Math.max(1, process.stdout.rows || 24);
   const startRow = clamp(dynamicRow, 1, rows);
   const availableRows = rows - startRow + 1;
   const timeText = `${formatTime(elapsedMs)} / ${formatTime(durationMs)}`;
-  const barWidth = clamp(columns - stringWidth(timeText) - 5, 1, 50);
+  const pauseWidth = paused ? stringWidth(' [已暂停]') : 0;
+  const barWidth = clamp(columns - stringWidth(timeText) - pauseWidth - 5, 1, 50);
   const ratio = durationMs ? clamp(elapsedMs / durationMs, 0, 1) : 0;
   const filled = Math.round(ratio * barWidth);
   const bar = `${'='.repeat(filled)}${filled < barWidth ? '>' : ''}${' '.repeat(Math.max(0, barWidth - filled - 1))}`;
-  const progressText = truncateText(`[${bar}] ${timeText}${paused ? '  [已暂停]' : ''}`, columns);
+  const progressText = playbackProgressText({ bar, timeText, paused, columns });
   const progress = paused ? chalk.yellow(progressText) : progressText;
-  const shortcutText = playbackShortcutText({ playlistOpen, hasPlaylist: Boolean(playlist?.tracks?.length) });
-  const indicatorRows = indicator
-    ? [chalk.yellow(truncateText(indicator, columns))]
-    : playbackShortcutRows({ playlistOpen, hasPlaylist: Boolean(playlist?.tracks?.length) }, columns)
-      .map((row) => chalk.cyanBright(row));
-  // 进度、可变行数快捷键提示和其后空行共同占用播放区。
-  const chromeRows = 1 + Math.min(indicatorRows.length, Math.max(0, availableRows - 1))
-    + (availableRows > 1 + indicatorRows.length ? 1 : 0);
+  const modeRows = playbackModeText
+    ? playbackPlaylistModeRows({
+        randomLabel: playbackModeText.randomLabel,
+        loopLabel: playbackModeText.loopLabel,
+        playlistOpen: playbackModeText.playlistOpen
+      }, columns).map((row) => chalk.magentaBright(row))
+    : [];
+  const shortcutRows = playbackShortcutRows({}, columns).map((row) => chalk.cyanBright(row));
+  // 快捷键始终保留；控制结果占用快捷键和歌词之间原本的空行。
+  const fixedChromeRows = 1 + modeRows.length + 1;
+  const visibleShortcutRows = shortcutRows.slice(0, Math.max(0, availableRows - fixedChromeRows));
+  const chromeRows = Math.min(availableRows, fixedChromeRows + visibleShortcutRows.length);
   const lyricCapacity = Math.max(0, availableRows - chromeRows);
   let contentRows;
   if (playlistOpen) {
@@ -530,7 +658,9 @@ function renderDynamic({
       ? [chalk.cyanBright.bold(title), ...(trackRows.length ? trackRows : [chalk.gray('歌单为空')])].slice(0, lyricCapacity)
       : [];
   } else {
-    const displayRows = playbackLyricRows(lyrics, lyricElapsedMs, lyricCapacity, showTranslation);
+    const displayRows = playbackLyricRows(
+      lyrics, lyricElapsedMs, lyricCapacity, showTranslation, columns, currentLyricOnly
+    );
     contentRows = displayRows.length
       ? displayRows.map((line) => {
           const text = truncateText(line.text, columns);
@@ -539,11 +669,14 @@ function renderDynamic({
           if (line.translation) return tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text);
           return tone === 'current' ? chalk.whiteBright.bold(text) : chalk.white(text);
         })
-      : lyricCapacity > 0 ? [chalk.gray(truncateText('暂无逐行歌词', columns))] : [];
+      : lyricCapacity > 0 ? [currentLyricOnly ? '' : chalk.gray(truncateText('暂无逐行歌词', columns))] : [];
   }
   const outputRows = [progress];
-  outputRows.push(...indicatorRows.slice(0, Math.max(0, availableRows - 1)));
-  if (outputRows.length < availableRows) outputRows.push('');
+  outputRows.push(...modeRows.slice(0, Math.max(0, availableRows - outputRows.length)));
+  outputRows.push(...visibleShortcutRows.slice(0, Math.max(0, availableRows - outputRows.length)));
+  if (outputRows.length < availableRows) {
+    outputRows.push(indicator ? chalk.yellow(truncateText(indicator, columns)) : '');
+  }
   outputRows.push(...contentRows);
   const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
   process.stdout.write(`${position}\x1b[0J${outputRows.join('\n')}`);
@@ -608,13 +741,14 @@ function writeTerminalOutput(output) {
   });
 }
 
-async function tryNativeGraphics(buffer, width, height) {
+async function tryNativeGraphics(buffer, width, height, protocol) {
   const kitty = supportsTerminalGraphics.stdout.kitty && process.env.TERM_PROGRAM !== 'iTerm.app';
   const iterm2 = supportsTerminalGraphics.stdout.iterm2;
-  if (!kitty && !iterm2) return false;
+  if ((protocol === 'kitty' && !kitty) || (protocol === 'iterm2' && !iterm2)) return false;
   const { default: terminalImage } = await import('terminal-image');
   const text = await terminalImage.buffer(buffer, { width, height, preserveAspectRatio: true });
-  const usedNativeProtocol = (kitty && text === '') || (iterm2 && typeof text === 'string' && text.includes('\x1b]1337;File='));
+  const usedNativeProtocol = (protocol === 'kitty' && text === '')
+    || (protocol === 'iterm2' && typeof text === 'string' && text.includes('\x1b]1337;File='));
   if (!usedNativeProtocol) return false;
   if (text) await writeTerminalOutput(text);
   // Kitty/iTerm 图像本身不会可靠地下移文本光标，显式预留单元格行。
@@ -622,8 +756,8 @@ async function tryNativeGraphics(buffer, width, height) {
   return true;
 }
 
-export async function tryRenderImage(source, { signal, size = 'detail', shouldRender } = {}) {
-  if (!source || !process.stdout.isTTY) return 0;
+export async function tryRenderImage(source, { signal, size = 'detail', shouldRender, protocol = 'auto' } = {}) {
+  if (!source || !process.stdout.isTTY || protocol === 'none') return 0;
   const guarded = typeof shouldRender === 'function';
   const current = () => !signal?.aborted && (!guarded || shouldRender());
   try {
@@ -634,21 +768,22 @@ export async function tryRenderImage(source, { signal, size = 'detail', shouldRe
     const width = Math.max(1, Math.min(size === 'playback' ? 52 : 56, columns - 2));
     const height = Math.max(1, Math.min(size === 'playback' ? 20 : 22, Math.floor(rows * 0.36), rows - 8));
     const hasChafa = commandExists('chafa');
-    const nativeGraphics = supportsTerminalGraphics.stdout.kitty || supportsTerminalGraphics.stdout.iterm2;
     const protocols = imageProtocolOrder({
-      nativeGraphics,
+      preference: protocol,
+      kitty: supportsTerminalGraphics.stdout.kitty && process.env.TERM_PROGRAM !== 'iTerm.app',
+      iterm2: supportsTerminalGraphics.stdout.iterm2,
       sixel: supportsSixelEnvironment(),
       chafa: hasChafa
     });
 
     for (const protocol of protocols) {
       if (!current()) return 0;
-      if (protocol === 'native') {
+      if (protocol === 'kitty' || protocol === 'iterm2') {
         // terminal-image 的 Kitty 路径可能在 Promise 返回前直接写 stdout，
         // 无法为连续切歌做 generation 校验；可取消的后台封面任务跳过该路径。
         if (guarded) continue;
         try {
-          if (await tryNativeGraphics(buffer, width, height)) return height;
+          if (await tryNativeGraphics(buffer, width, height, protocol)) return height;
         } catch {}
       }
 
@@ -709,6 +844,8 @@ export async function playWithProgress({
   translatedLyricSource = '',
   lyricOffsetMs = 2000,
   smtcOffsetMs = 0,
+  playerBackend = 'auto',
+  imageProtocol = 'auto',
   playlist = { name: '', tracks: [], currentIndex: 0 },
   signal,
   logger,
@@ -718,7 +855,7 @@ export async function playWithProgress({
   onTrackChange
 }) {
   await closeRetainedSmtc();
-  let player = findPlayer();
+  let player = findPlayer(playerCommandsForBackend(playerBackend));
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
   let activeSong = song;
@@ -743,9 +880,17 @@ export async function playWithProgress({
   const playbackPlaylist = { name: playlist?.name || '', tracks: playlistTracks, currentIndex: playlistCurrentIndex };
   let playlistOpen = false;
   let playlistSelection = playlistCurrentIndex >= 0 ? playlistCurrentIndex : 0;
+  let randomMode = 'off';
+  let loopMode = 'sequence';
+  let randomRemaining = Math.max(0, playlistTracks.length - 1);
+  let shuffleOrder = shuffledPlaylistOrder(playlistTracks.length, playlistCurrentIndex);
+  const playHistory = playlistCurrentIndex >= 0 ? [playlistCurrentIndex] : [];
+  const randomLabels = { off: '不随机', random: '纯随机', shuffle: '打乱列表' };
+  const loopLabels = { sequence: '顺序播放', list: '列表循环', single: '单曲循环' };
   let child = null;
-  let mpvController = null;
-  let mpvLoaded = false;
+  let persistentController = null;
+  let persistentLoaded = false;
+  let backendLabel = playerBackendLabel(player.command);
   let finished = false;
   let closing = false;
   let trackTransitioning = false;
@@ -782,9 +927,41 @@ export async function playWithProgress({
   });
 
   const updateSmtcControls = () => smtc.updateControls({
-    canPrevious: playlistCurrentIndex > 0,
-    canNext: playlistCurrentIndex >= 0 && playlistCurrentIndex < playlistTracks.length - 1
+    canPrevious: playHistory.length > 1 || playlistCurrentIndex > 0,
+    canNext: playlistTracks.length > 1 && (loopMode !== 'sequence' || randomMode !== 'off' || playlistCurrentIndex < playlistTracks.length - 1)
   });
+
+  const resetRandomCycle = () => {
+    randomRemaining = Math.max(0, playlistTracks.length - 1);
+    shuffleOrder = shuffledPlaylistOrder(playlistTracks.length, playlistCurrentIndex);
+  };
+
+  const nextModeTarget = ({ natural = false } = {}) => {
+    const count = playlistTracks.length;
+    if (!count) return null;
+    if (natural && loopMode === 'single') return playlistCurrentIndex;
+    if (randomMode === 'off') {
+      if (playlistCurrentIndex + 1 < count) return playlistCurrentIndex + 1;
+      return loopMode === 'list' ? 0 : null;
+    }
+    if (count === 1) return loopMode === 'list' ? 0 : null;
+    if (randomRemaining <= 0) {
+      if (loopMode !== 'list') return null;
+      resetRandomCycle();
+    }
+    randomRemaining -= 1;
+    if (randomMode === 'random') {
+      let target = playlistCurrentIndex;
+      while (target === playlistCurrentIndex) target = Math.floor(Math.random() * count);
+      return target;
+    }
+    let position = shuffleOrder.indexOf(playlistCurrentIndex);
+    if (position < 0 || position + 1 >= shuffleOrder.length) {
+      shuffleOrder = shuffledPlaylistOrder(count, playlistCurrentIndex);
+      position = 0;
+    }
+    return shuffleOrder[position + 1] ?? null;
+  };
 
   const updateSmtc = (status, rawPositionMs = clock.position()) => {
     const timeline = smtcTimeline(rawPositionMs, activeDurationMs, activeOffsetMs + activeSmtcOffsetMs);
@@ -792,16 +969,24 @@ export async function playWithProgress({
   };
 
   const spawnAt = async (positionMs) => {
-    if (mpvController) {
-      await mpvController.load(activeUrl, { positionMs, volume });
-      await mpvController.resume();
-      mpvLoaded = true;
+    if (persistentController) {
+      await persistentController.load(activeUrl, { positionMs, volume, durationMs: activeDurationMs, metadata: activeSong });
+      await persistentController.resume();
+      persistentLoaded = true;
       sessionEnded = false;
       updateSmtc('playing', positionMs);
-      void logger?.info('player_load', { player: 'mpv', positionMs });
+      void logger?.info('player_load', { player: player.command, positionMs });
       return;
     }
-    const instance = spawn(player.command, player.args(activeUrl, positionMs / 1000, volume), { stdio: 'ignore', windowsHide: true });
+    const args = player.args(activeUrl, positionMs / 1000, volume);
+    const marker = `ncm-cli-${randomUUID()}`;
+    if (player.command === 'ffplay') args.splice(Math.max(0, args.length - 1), 0, '-window_title', marker);
+    else if (player.command === 'mpv') args.splice(Math.max(0, args.length - 1), 0, `--user-agent=${marker}`);
+    else if (player.command === 'vlc' || player.command === 'cvlc') {
+      args.splice(Math.max(0, args.length - 1), 0, `--http-user-agent=${marker}`);
+    }
+    const instance = spawn(player.executable, args, { stdio: 'ignore', windowsHide: true });
+    guardPlayerProcess(instance, { command: player.executable, marker });
     child = instance;
     sessionEnded = false;
     updateSmtc('playing', positionMs);
@@ -820,9 +1005,9 @@ export async function playWithProgress({
   };
 
   const stopCurrent = async () => {
-    if (mpvController) {
-      if (mpvLoaded && mpvController.available) await mpvController.stop();
-      mpvLoaded = false;
+    if (persistentController) {
+      if (persistentLoaded && persistentController.available) await persistentController.stop();
+      persistentLoaded = false;
       return;
     }
     const instance = child;
@@ -868,7 +1053,11 @@ export async function playWithProgress({
       indicator,
       playlist: playbackPlaylist,
       playlistOpen,
-      playlistSelection
+      playlistSelection,
+      playbackModeText: playlistTracks.length
+        ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen }
+        : '',
+      currentLyricOnly: String(activeSong?.id ?? '') === '405372425'
     });
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
     refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, userPaused, activeOffsetMs), indicatorDelay));
@@ -950,6 +1139,7 @@ export async function playWithProgress({
       ? await tryRenderImage(songSnapshot.cover, {
           signal: headerSignal,
           size: 'playback',
+          protocol: imageProtocol,
           shouldRender: () => renderId === headerRenderId && !finished
         })
       : 0;
@@ -959,6 +1149,7 @@ export async function playWithProgress({
       chalk.bold(truncateText(songSnapshot.name || songSnapshot.title || '', initialColumns)),
       truncateText(`歌手：${artists || '未知'}`, initialColumns),
       truncateText(`专辑：${songSnapshot.album || '未知'}`, initialColumns),
+      truncateText(`播放器：${backendLabel}`, initialColumns),
       truncateText(`ID：${songSnapshot.id ?? ''}`, initialColumns)
     ];
     const metadataCapacity = Math.max(0, initialRows - coverRows - 1);
@@ -1046,6 +1237,7 @@ export async function playWithProgress({
     hasTranslation = lyrics.some((line) => Boolean(line.translation));
     showTranslation = hasTranslation;
     playlistCurrentIndex = resolvedIndex;
+    if (!sameTrack && cause !== 'history') playHistory.push(resolvedIndex);
     playbackPlaylist.currentIndex = resolvedIndex;
     playlistSelection = resolvedIndex;
     playlistOpen = false;
@@ -1087,14 +1279,12 @@ export async function playWithProgress({
     userPaused = true;
     clock.seekTo(activeDurationMs);
     updateSmtc('stopped', activeDurationMs);
-    if (playlistTracks.length && playlistCurrentIndex < playlistTracks.length - 1) {
-      // 自然连播时跳过临时不可用的歌曲，直到找到下一首可播放曲目。
-      userPaused = false;
-      for (let targetIndex = playlistCurrentIndex + 1; targetIndex < playlistTracks.length; targetIndex += 1) {
+    if (playlistTracks.length) {
+      const targetIndex = nextModeTarget({ natural: true });
+      if (targetIndex !== null) {
+        userPaused = false;
         const result = await transitionTo(targetIndex, 'natural');
         if (result === true || result === transitionCancelled) return;
-        if (finished) return;
-        if (userPaused) break;
       }
     }
     userPaused = true;
@@ -1136,15 +1326,16 @@ export async function playWithProgress({
       if (playlistTracks.length) {
         const type = action.action === 'previous' ? 'playlist_previous'
           : action.action === 'next' ? 'playlist_next' : action.type;
-        const delta = type === 'playlist_previous' ? -1 : 1;
-        const immediateTarget = playlistCurrentIndex + delta;
-        if (immediateTarget < 0 || immediateTarget >= playlistTracks.length) return;
+        const previous = type === 'playlist_previous';
+        const immediateTarget = previous
+          ? (playHistory.length > 1 ? playHistory.at(-2) : playlistCurrentIndex - 1)
+          : nextModeTarget();
+        if (immediateTarget === null || immediateTarget < 0 || immediateTarget >= playlistTracks.length) return;
         cancelTrackTransition('切歌目标已更新');
         invalidateRestart();
         enqueue(() => {
-          const targetIndex = playlistCurrentIndex + delta;
-          if (targetIndex < 0 || targetIndex >= playlistTracks.length) return false;
-          return transitionTo(targetIndex, 'control');
+          if (previous && playHistory.length > 1) playHistory.pop();
+          return transitionTo(immediateTarget, previous ? 'history' : 'control');
         });
       }
       return;
@@ -1178,6 +1369,21 @@ export async function playWithProgress({
       }
       return;
     }
+    if (action.type === 'cycle_random_mode' && playlistTracks.length) {
+      randomMode = RANDOM_MODES[(RANDOM_MODES.indexOf(randomMode) + 1) % RANDOM_MODES.length];
+      resetRandomCycle();
+      setIndicator(`随机模式：${randomLabels[randomMode]}`);
+      updateSmtcControls();
+      render();
+      return;
+    }
+    if (action.type === 'cycle_loop_mode' && playlistTracks.length) {
+      loopMode = LOOP_MODES[(LOOP_MODES.indexOf(loopMode) + 1) % LOOP_MODES.length];
+      setIndicator(`循环模式：${loopLabels[loopMode]}`);
+      updateSmtcControls();
+      render();
+      return;
+    }
     if (action.type === 'toggle_pause' || action.action === 'play' || action.action === 'pause') {
       if (sessionEnded && (action.action === 'play' || action.type === 'toggle_pause')) {
         enqueue(async () => {
@@ -1200,7 +1406,7 @@ export async function playWithProgress({
         setIndicator('已暂停');
         render();
         if (!trackTransitioning) {
-          enqueue(() => mpvController ? mpvController.pause() : stopCurrent());
+          enqueue(() => persistentController ? persistentController.pause() : stopCurrent());
         }
       } else if (shouldPlay && userPaused) {
         userPaused = false;
@@ -1211,7 +1417,7 @@ export async function playWithProgress({
           enqueue(async () => {
             if (closing) return;
             const resumeAt = clock.position();
-            if (mpvController && mpvLoaded) mpvController.resume();
+            if (persistentController && persistentLoaded) await persistentController.resume();
             else await spawnAt(resumeAt);
             clock.resume();
             setIndicator('继续播放');
@@ -1233,8 +1439,8 @@ export async function playWithProgress({
       if (action.action === 'seek_absolute') setIndicator(`跳转到 ${formatTime(displayPosition(seekTo, activeOffsetMs))}`);
       else setIndicator(deltaMs > 0 ? '快进 5 秒' : '后退 5 秒');
       render();
-      if (mpvController) {
-        enqueue(() => mpvController.seekAbsolute(seekTo / 1000));
+      if (persistentController) {
+        enqueue(() => persistentController.seekAbsolute(seekTo / 1000));
         updateSmtc(userPaused ? 'paused' : 'playing', seekTo);
       } else if (!userPaused) scheduleRestart(seekTo);
       else updateSmtc('paused', seekTo);
@@ -1244,7 +1450,7 @@ export async function playWithProgress({
       volume = clamp(volume + action.delta, 0, 100);
       setIndicator(`音量 ${volume}%`);
       render();
-      if (mpvController) enqueue(() => mpvController.setVolume(volume));
+      if (persistentController) enqueue(() => persistentController.setVolume(volume));
       else if (!userPaused && !trackTransitioning) scheduleRestart(clock.position());
       return;
     }
@@ -1284,30 +1490,60 @@ export async function playWithProgress({
   };
 
   let restoreInput = () => {};
-  const resize = () => render();
+  const resizeRefresh = createLatestDebounce(() => {
+    if (finished || closing) return;
+    void drawHeader().catch((error) => {
+      if (error?.name !== 'AbortError') void logger?.warn('playback_resize_refresh_failed', { error });
+    });
+  }, 180);
+  const resize = () => {
+    render();
+    resizeRefresh.schedule();
+  };
   try {
-    if (player.command === 'mpv') {
-      const controller = createMpvController({
-        logger,
+    while (['mpv', 'vlc', 'cvlc'].includes(player.command)) {
+      let controller;
+      const callbacks = {
         onEnd: (_event, generation) => {
-          if (!finished && !closing) {
-            enqueue(() => generation === controller.generation ? handleNaturalEnd() : undefined);
-          }
+          if (!finished && !closing) enqueue(
+            () => generation === controller.generation ? handleNaturalEnd() : undefined
+          );
+        },
+        onPauseChange: (paused) => {
+          if (!persistentLoaded || finished || closing || trackTransitioning || sessionEnded) return;
+          dispatchPlaybackAction({ action: paused ? 'pause' : 'play', source: 'player' });
+        },
+        onPositionChange: (seconds, _event, generation) => {
+          if (!persistentLoaded || finished || closing || trackTransitioning || sessionEnded
+              || generation !== controller.generation) return;
+          const localPosition = clock.position();
+          if (!shouldSyncPlayerPosition(localPosition, seconds)) return;
+          const remotePosition = clock.seekTo(Number(seconds) * 1000);
+          updateSmtc(userPaused ? 'paused' : 'playing', remotePosition);
+          setIndicator(`播放器跳转到 ${formatTime(displayPosition(remotePosition, activeOffsetMs))}`);
+          render();
         },
         onError: (error) => {
           if (!finished && !closing) rejectCompletion(error);
         }
-      });
+      };
+      controller = player.command === 'mpv'
+        ? createMpvController({ command: player.executable, ...callbacks })
+        : createVlcController({ command: player.executable, ...callbacks });
       try {
         await controller.initialize();
-        mpvController = controller;
+        persistentController = controller;
+        backendLabel = playerBackendLabel(player.command, { persistent: true });
+        break;
       } catch (error) {
         await controller.close();
-        void logger?.warn('mpv_ipc_unavailable', { error });
-        player = findPlayer(['ffplay', 'vlc', 'cvlc']);
-        if (!player) throw new Error('mpv IPC 初始化失败，且未找到 ffplay 或 VLC 回退播放器。', { cause: error });
+        void logger?.warn('persistent_player_unavailable', { player: player.command, error });
+        if (player.command !== 'mpv' || playerBackend !== 'auto') break;
+        player = findPlayer(['vlc', 'cvlc', 'ffplay']);
+        if (!player) throw new Error('mpv IPC 初始化失败，且未找到 VLC 或 ffplay 回退播放器。', { cause: error });
       }
     }
+    if (!persistentController) backendLabel = playerBackendLabel(player.command, { persistent: false });
     if (tty) {
       process.stdout.write(`\x1b[?1049h${playbackTerminalModeSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
       await drawHeader();
@@ -1335,10 +1571,11 @@ export async function playWithProgress({
     headerAbortController?.abort();
     signal?.removeEventListener('abort', abort);
     process.stdout.removeListener('resize', resize);
+    resizeRefresh.cancel();
     try {
       await offsetPersistence;
       await stopCurrent();
-      await mpvController?.close();
+      await persistentController?.close();
       if (!retainSmtc) {
         updateSmtc('stopped');
         await smtc.close();

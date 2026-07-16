@@ -33,10 +33,25 @@ export const QUALITY_LEVELS = Object.freeze([
   'standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'dolby', 'jymaster'
 ]);
 
+export const PLAYER_BACKENDS = Object.freeze(['auto', 'mpv', 'vlc', 'ffplay']);
+export const IMAGE_PROTOCOLS = Object.freeze(['auto', 'sixel', 'kitty', 'iterm2', 'symbols', 'ansi', 'none']);
+
 export function parseQualityCommand(input) {
   const match = input.trim().match(/^\/quality(?:\s+([\s\S]+))?$/i);
   if (!match) return null;
   return { level: match[1]?.trim().toLowerCase() || null };
+}
+
+export function parsePlayerCommand(input) {
+  const match = input.trim().match(/^\/player(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  return { backend: match[1]?.trim().toLowerCase() || null };
+}
+
+export function parseImageCommand(input) {
+  const match = input.trim().match(/^\/image(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  return { protocol: match[1]?.trim().toLowerCase() || null };
 }
 
 export function parseOffsetCommand(input) {
@@ -65,12 +80,6 @@ export function parseApiCommand(input) {
   const match = input.trim().match(/^\/api(?:\s+([\s\S]+))?$/i);
   if (!match) return null;
   return { url: match[1]?.trim() || null };
-}
-
-export function parseLyricAction(input) {
-  const match = input.trim().match(/^\/?(?:l|lyric|歌词)(?:\s*(?:>|\|)\s*(.+))?$/i);
-  if (!match) return null;
-  return { output: match[1]?.trim() || null };
 }
 
 const LYRIC_FORMATS = new Set(['plain', 'lrc', 'trans', 'all']);
