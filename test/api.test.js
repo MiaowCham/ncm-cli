@@ -64,6 +64,62 @@ test('API 地址的路径前缀会保留在请求中', async () => {
   }
 });
 
+test('添加歌曲使用歌单增曲 API', async () => {
+  let received;
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    received = {
+      pathname: url.pathname,
+      op: url.searchParams.get('op'),
+      pid: url.searchParams.get('pid'),
+      tracks: url.searchParams.get('tracks')
+    };
+    response.setHeader('content-type', 'application/json');
+    response.end('{"code":200}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    assert.deepEqual(await api.addPlaylistTracks('liked-1', ['10', 20]), {
+      code: 200, playlistId: 'liked-1', tracks: ['10', '20'], alreadyPresent: false
+    });
+    assert.deepEqual(received, {
+      pathname: '/playlist/tracks', op: 'add', pid: 'liked-1', tracks: '10,20'
+    });
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
+test('歌单增曲兼容代理包装响应，并把重复歌曲识别为已收藏', async () => {
+  const operations = [];
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    operations.push(url.searchParams.get('op'));
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(url.searchParams.get('op') === 'add'
+      ? { status: 200, body: { code: 502, message: '歌单内歌曲重复' } }
+      : { status: 200, body: { code: 200 } }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
+    assert.deepEqual(await api.addPlaylistTracks('liked-1', ['10']), {
+      code: 502, playlistId: 'liked-1', tracks: ['10'], alreadyPresent: true
+    });
+    assert.deepEqual(await api.removePlaylistTracks('liked-1', ['10']), {
+      code: 200, playlistId: 'liked-1', tracks: ['10'], alreadyPresent: false
+    });
+    assert.deepEqual(operations, ['add', 'del']);
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
+});
+
 test('歌词搜索兼容字符串命中片段并移除 HTML', async () => {
   let receivedLimit;
   let receivedType;
