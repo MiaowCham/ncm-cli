@@ -10,6 +10,9 @@ import { Logger } from './logger.js';
 import { closeRetainedSmtc, findPlayer, playerBackendLabel, playerCommandsForBackend, playWithProgress, tryRenderImage } from './media.js';
 import { parsePlaylistExportFormatSelection, playlistExportContent } from './playlist-export.js';
 import { readTerminalKey, selectTerminalList } from './terminal-list.js';
+import { acquireTerminalScreen } from './terminal-screen.js';
+import { secondaryText } from './terminal-theme.js';
+import { resolveNeteaseMusicInput } from './music-link.js';
 import { writeExport } from './output-file.js';
 import { cleanupStalePlayerSessions } from './player-registry.js';
 import {
@@ -168,7 +171,7 @@ async function handleApiCommand(rl, api, context, command) {
 function printSearchResults(songs) {
   console.log();
   songs.forEach((song, index) => {
-    console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${chalk.bold(song.name)} — ${song.artists.join('/')}  ${chalk.gray(`[${song.id}] ${formatDuration(song.durationMs)}`)}`);
+    console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${chalk.bold(song.name)} — ${song.artists.join('/')}  ${secondaryText(`[${song.id}] ${formatDuration(song.durationMs)}`)}`);
   });
 }
 
@@ -204,6 +207,12 @@ export function songLyricPreview(lyrics, capacity) {
   return lines.slice(0, Math.max(0, Math.floor(Number(capacity) || 0)));
 }
 
+export function songLyricPreviewRemaining(lyrics, capacity) {
+  const text = plainLyrics(lyrics?.original || '');
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return Math.max(0, lines.length - Math.max(0, Math.floor(Number(capacity) || 0)));
+}
+
 async function showSong(song, signal, imageProtocol = 'auto', lyrics = null) {
   console.log();
   const coverRows = song.cover
@@ -212,11 +221,13 @@ async function showSong(song, signal, imageProtocol = 'auto', lyrics = null) {
   console.log(chalk.bold.green(song.name));
   console.log(`歌手：${song.artists.join('/') || '未知'}\n专辑：${song.album}\nID：${song.id}\n时长：${formatDuration(song.durationMs)}`);
   const previewCapacity = Math.max(0, (output.rows || 24) - coverRows - 10);
-  const preview = songLyricPreview(lyrics, Math.max(0, previewCapacity - 1));
+  const capacity = Math.max(0, previewCapacity - 1);
+  const preview = songLyricPreview(lyrics, capacity);
   if (preview.length) {
     console.log(chalk.bold('\n歌词预览'));
     for (const line of preview) console.log(chalk.white(line));
-    console.log(chalk.gray('...'));
+    const remaining = songLyricPreviewRemaining(lyrics, capacity);
+    if (remaining) console.log(secondaryText(`另有 ${remaining} 行`));
   }
 }
 
@@ -667,6 +678,15 @@ async function playSong(api, song, context, rl, cachedLyrics = null) {
 }
 
 async function songMenu(rl, api, song, context) {
+  const releaseScreen = acquireTerminalScreen(output);
+  try {
+    return await songMenuInScreen(rl, api, song, context);
+  } finally {
+    releaseScreen();
+  }
+}
+
+async function songMenuInScreen(rl, api, song, context) {
   const { signal, authState } = context;
   let cachedLyrics = null;
   try {
@@ -677,15 +697,17 @@ async function songMenu(rl, api, song, context) {
   }
   let linksVisible = false;
   let songLinks = [];
+  let favorited = false;
+  let favoritePending = false;
   while (true) {
     const page = await openDetailPage(
       rl,
       () => showSong(song, signal, context.settings.imageProtocol, cachedLyrics),
       () => detailFooterPrompt(
-        chalk.yellow('[p]播放 [l]歌词导出 [u]播放链接 [q]返回 > '),
+        chalk.yellow(songDetailPrompt({ loggedIn: authState.loggedIn, favorited })),
         linksVisible ? songLinks : []
       ),
-      ['p', 'l', 'u', 'q'],
+      authState.loggedIn ? ['p', 'l', 'u', 'f', 'q'] : ['p', 'l', 'u', 'q'],
       context
     );
     const { action } = page;
@@ -710,6 +732,25 @@ async function songMenu(rl, api, song, context) {
         }
         continue;
       }
+      if (/^(?:f|favorite|收藏)$/i.test(action) && authState.loggedIn && !favoritePending) {
+        linksVisible = false;
+        favoritePending = true;
+        try {
+          const removing = favorited;
+          const result = await updateLikedPlaylist(api, song, context, removing ? 'del' : 'add');
+          favorited = !removing;
+          await showDetailNotice(removing
+            ? '已从喜欢的音乐中移除'
+            : result?.alreadyPresent ? '当前歌曲已在喜欢的音乐中' : '已添加至喜欢的音乐', context);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          void context.logger.warn('favorite_song_failed', { songId: song.id, error });
+          await showDetailNotice(`收藏操作失败：${error?.message || '未知错误'}`, context);
+        } finally {
+          favoritePending = false;
+        }
+        continue;
+      }
       if (/^(?:p|play|播放)$/i.test(action)) {
         linksVisible = false;
         page.close();
@@ -721,6 +762,11 @@ async function songMenu(rl, api, song, context) {
       page.close();
     }
   }
+}
+
+export function songDetailPrompt({ loggedIn = false, favorited = false } = {}) {
+  const favorite = loggedIn ? ` [f]${favorited ? '取消收藏' : '收藏'}` : '';
+  return `[p]播放 [l]歌词导出 [u]播放链接${favorite} [q]返回 > `;
 }
 
 function playlistCreatorName(playlist) {
@@ -753,12 +799,14 @@ async function readDetailAction(rl, prompt, keys, context, onResize) {
 
 async function openDetailPage(rl, render, prompt, keys, context) {
   const tty = input.isTTY && output.isTTY;
-  if (tty) output.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
+  const releaseScreen = tty ? acquireTerminalScreen(output) : () => {};
+  if (tty) output.write('\x1b[?25l\x1b[2J\x1b[H');
   let closed = false;
   const close = () => {
     if (closed) return;
     closed = true;
-    if (tty) output.write('\x1b[?25h\x1b[?1049l');
+    if (tty) output.write('\x1b[?25h');
+    releaseScreen();
   };
   try {
     const redraw = async () => {
@@ -917,6 +965,15 @@ export function playlistPreviewLimit(rows, coverRows = 0, hasDescription = false
 }
 
 async function playlistMenu(rl, api, id, context) {
+  const releaseScreen = acquireTerminalScreen(output);
+  try {
+    return await playlistMenuInScreen(rl, api, id, context);
+  } finally {
+    releaseScreen();
+  }
+}
+
+async function playlistMenuInScreen(rl, api, id, context) {
   const playlist = await api.playlistDetail(id, { signal: context.signal });
   const previewTracks = playlist.tracks || [];
   let fullTracks = null;
@@ -943,12 +1000,13 @@ async function playlistMenu(rl, api, id, context) {
     if (playlist.description) console.log(`描述：${String(playlist.description).replace(/\s+/g, ' ').trim()}`);
     console.log(chalk.bold('\n歌曲预览'));
     const limit = Math.max(1, playlistPreviewLimit(output.rows, coverRows, Boolean(playlist.description))
-      - (linksVisible ? 2 : 0));
+      - (linksVisible ? 2 : 0) - 1);
     previewTracks.slice(0, limit).forEach((song, index) => {
-      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${song.name} — ${song.artists?.join('/') || '未知歌手'} ${chalk.gray(`[${song.id}]`)}`);
+      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${song.name} — ${song.artists?.join('/') || '未知歌手'} ${secondaryText(`[${song.id}]`)}`);
     });
     const remaining = Math.max(0, (playlist.trackCount ?? previewTracks.length) - Math.min(limit, previewTracks.length));
-    if (remaining) console.log(chalk.gray(`……另有 ${remaining} 首`));
+    if (remaining) console.log(secondaryText(`另有 ${remaining} 首`));
+    console.log();
   };
 
   while (true) {
@@ -1054,6 +1112,15 @@ async function playlistMenu(rl, api, id, context) {
 }
 
 async function listUserPlaylists(rl, api, context) {
+  const releaseScreen = acquireTerminalScreen(output);
+  try {
+    return await listUserPlaylistsInScreen(rl, api, context);
+  } finally {
+    releaseScreen();
+  }
+}
+
+async function listUserPlaylistsInScreen(rl, api, context) {
   if (!context.authState.loggedIn) {
     console.log('此命令需要登录，请先使用 /login。');
     return;
@@ -1091,7 +1158,7 @@ async function listUserPlaylists(rl, api, context) {
     }
     console.log(chalk.bold('\n我的歌单'));
     playlists.forEach((playlist, index) => {
-      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${playlist.name} ${chalk.gray(`[${playlist.id}] ${playlist.trackCount ?? 0} 首`)}`);
+      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${playlist.name} ${secondaryText(`[${playlist.id}] ${playlist.trackCount ?? 0} 首`)}`);
     });
     const raw = (await ask(rl, '选择序号预览歌单，q 返回主页：', context.signal)).trim();
     if (/^q$/i.test(raw)) return;
@@ -1106,6 +1173,15 @@ async function listUserPlaylists(rl, api, context) {
 }
 
 async function chooseSong(rl, api, songs, context) {
+  const releaseScreen = acquireTerminalScreen(output);
+  try {
+    return await chooseSongInScreen(rl, api, songs, context);
+  } finally {
+    releaseScreen();
+  }
+}
+
+async function chooseSongInScreen(rl, api, songs, context) {
   if (input.isTTY && output.isTTY && typeof input.setRawMode === 'function') {
     const selection = await selectTerminalList({
       rl,
@@ -1161,7 +1237,7 @@ async function lyricSearchFlow(rl, api, command, context) {
   while (true) {
     printSearchResults(songs);
     songs.forEach((song, index) => {
-      if (song.lyricMatches?.length) console.log(chalk.gray(`    ${index + 1}: ${song.lyricMatches.slice(0, 2).join(' / ')}`));
+      if (song.lyricMatches?.length) console.log(secondaryText(`    ${index + 1}: ${song.lyricMatches.slice(0, 2).join(' / ')}`));
     });
     const raw = (await ask(rl, '选择序号（可追加 > 文件 或 | 文件），q 返回搜索：', context.signal)).trim();
     const selection = parseNumberSelection(raw);
@@ -1245,6 +1321,16 @@ async function resolveInput(rl, api, raw, context) {
   const playlist = parsePlaylistCommand(raw);
   if (playlist) {
     await playlistMenu(rl, api, playlist, context);
+    return;
+  }
+
+  const musicLink = await resolveNeteaseMusicInput(raw, { signal });
+  if (musicLink?.type === 'song') {
+    await songMenu(rl, api, await api.songDetail(musicLink.id, { signal }), context);
+    return;
+  }
+  if (musicLink?.type === 'playlist') {
+    await playlistMenu(rl, api, musicLink.id, context);
     return;
   }
 

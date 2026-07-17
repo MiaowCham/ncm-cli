@@ -12,6 +12,8 @@ import { createSmtcBridge } from './smtc.js';
 import { createVlcController } from './vlc-controller.js';
 import { hasProcessExited } from './process-state.js';
 import { guardPlayerProcess } from './process-guardian.js';
+import { acquireTerminalScreen } from './terminal-screen.js';
+import { primaryText, secondaryText } from './terminal-theme.js';
 
 let cachedWindowsTerminalVersion;
 let retainedSmtcBridge = null;
@@ -656,10 +658,10 @@ function renderDynamic({
       const prefix = `${item.current ? '▶' : ' '} ${item.selected ? '›' : ' '} `;
       const text = truncateText(`${prefix}${playlistTrackText(item.track, item.index)}`, columns);
       if (item.selected) return chalk.bgWhite.black(text);
-      return item.current ? chalk.whiteBright.bold(text) : chalk.gray(text);
+      return item.current ? chalk.whiteBright.bold(text) : secondaryText(text);
     });
     contentRows = lyricCapacity > 0
-      ? [chalk.cyanBright.bold(title), ...(trackRows.length ? trackRows : [chalk.gray('歌单为空')])].slice(0, lyricCapacity)
+      ? [chalk.cyanBright.bold(title), ...(trackRows.length ? trackRows : [secondaryText('歌单为空')])].slice(0, lyricCapacity)
       : [];
   } else {
     const displayRows = playbackLyricRows(
@@ -669,11 +671,11 @@ function renderDynamic({
       ? displayRows.map((line) => {
           const text = truncateText(line.text, columns);
           const tone = lyricTone(line);
-          if (tone === 'future') return chalk.gray(text);
+          if (tone === 'future') return secondaryText(text);
           if (line.translation) return tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text);
-          return tone === 'current' ? chalk.whiteBright.bold(text) : chalk.white(text);
+          return tone === 'current' ? primaryText(text) : chalk.white(text);
         })
-      : lyricCapacity > 0 ? [currentLyricOnly ? '' : chalk.gray(truncateText('暂无逐行歌词', columns))] : [];
+      : lyricCapacity > 0 ? [currentLyricOnly ? '' : secondaryText(truncateText('暂无逐行歌词', columns))] : [];
   }
   const outputRows = [progress];
   outputRows.push(...modeRows.slice(0, Math.max(0, availableRows - outputRows.length)));
@@ -859,6 +861,7 @@ export async function playWithProgress({
   onTrackChange,
   onFavorite
 }) {
+  let releaseScreen = () => {};
   await closeRetainedSmtc();
   let player = findPlayer(playerCommandsForBackend(playerBackend));
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
@@ -1535,6 +1538,7 @@ export async function playWithProgress({
     render();
     resizeRefresh.schedule();
   };
+  releaseScreen = tty ? acquireTerminalScreen(process.stdout) : () => {};
   try {
     while (['mpv', 'vlc', 'cvlc'].includes(player.command)) {
       let controller;
@@ -1580,7 +1584,7 @@ export async function playWithProgress({
     }
     if (!persistentController) backendLabel = playerBackendLabel(player.command, { persistent: false });
     if (tty) {
-      process.stdout.write(`\x1b[?1049h${playbackTerminalModeSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
+      process.stdout.write(`${playbackTerminalModeSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
       await drawHeader();
       restoreInput = setupRawInput(rl, handleData);
       process.stdout.on('resize', resize);
@@ -1618,8 +1622,9 @@ export async function playWithProgress({
     } finally {
       try { restoreInput(); } catch {}
       if (tty) {
-        try { process.stdout.write(`${playbackTerminalModeSequence(false)}\x1b[?25h\x1b[?1049l`); } catch {}
+        try { process.stdout.write(`${playbackTerminalModeSequence(false)}\x1b[?25h`); } catch {}
       }
+      releaseScreen();
     }
   }
 }

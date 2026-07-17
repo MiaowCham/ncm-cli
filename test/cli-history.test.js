@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ask, detailFooterPrompt, detailOverlaySequence, playlistPlaybackDestination, playlistPreviewLimit, songLyricPreview } from '../src/cli.js';
+import { ask, detailFooterPrompt, detailOverlaySequence, playlistPlaybackDestination, playlistPreviewLimit, songDetailPrompt, songLyricPreview, songLyricPreviewRemaining } from '../src/cli.js';
 
 function fakeReadline(history, answer = '子界面输入', error = null) {
   return {
@@ -43,6 +43,14 @@ test('歌曲详情歌词预览按可用行数裁剪并去除时间标签', () =>
     '第一行', '第二行'
   ]);
   assert.deepEqual(songLyricPreview(null, 5), []);
+  assert.equal(songLyricPreviewRemaining({ original: '第一行\n第二行\n第三行' }, 2), 1);
+  assert.equal(songLyricPreviewRemaining({ original: '第一行' }, 2), 0);
+});
+
+test('歌曲详情只为登录用户显示可切换的收藏按钮', () => {
+  assert.equal(songDetailPrompt().includes('收藏'), false);
+  assert.match(songDetailPrompt({ loggedIn: true }), /\[f\]收藏/);
+  assert.match(songDetailPrompt({ loggedIn: true, favorited: true }), /\[f\]取消收藏/);
 });
 
 test('主页输入保留在 readline 历史', async () => {
