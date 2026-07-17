@@ -1,8 +1,9 @@
 import chalk from 'chalk';
 import stringWidth from 'string-width';
+import { acquireTerminalScreen } from './terminal-screen.js';
 
-const ENTER_MODES = '\x1b[?1049h\x1b[?1007l\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[2J\x1b[H';
-const EXIT_MODES = '\x1b[?1000l\x1b[?1006l\x1b[?1007h\x1b[?25h\x1b[?1049l';
+const ENTER_MODES = '\x1b[?1007l\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[2J\x1b[H';
+const EXIT_MODES = '\x1b[?1000l\x1b[?1006l\x1b[?1007h\x1b[?25h';
 
 function clamp(value, minimum, maximum) {
   return Math.min(Math.max(value, minimum), maximum);
@@ -130,6 +131,7 @@ export async function readTerminalKey({
     signal?.removeEventListener('abort', abort);
     if (onResize) output.removeListener('resize', resize);
     if (inputAttached) restoreRawInput(input, rl, inputState, onData);
+    output.write('\x1b[?25h');
   }
 }
 
@@ -199,6 +201,7 @@ export async function selectTerminalList({
     listeners: input.listeners('data')
   };
   let inputAttached = false;
+  const releaseScreen = acquireTerminalScreen(output);
   const resize = () => render();
   try {
     rl?.pause();
@@ -218,5 +221,6 @@ export async function selectTerminalList({
     output.removeListener('resize', resize);
     if (inputAttached) restoreRawInput(input, rl, inputState, onData);
     try { output.write(EXIT_MODES); } catch {}
+    releaseScreen();
   }
 }
