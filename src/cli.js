@@ -618,6 +618,21 @@ function unavailableUrlMessage(result, authState) {
   return `无法播放：API 返回歌曲状态 code=${code}，未提供 URL（当前${auth}）。可能受会员、版权或地区限制。`;
 }
 
+async function updateLikedPlaylist(api, song, context, operation = 'add') {
+  const uid = context.authState.profile?.userId || context.authState.account?.id;
+  if (!uid) throw new Error('无法确定当前登录用户');
+  context.likedPlaylistPromise ||= api.userPlaylists(uid, { signal: context.signal }).then((playlists) => {
+    const liked = playlists.find((playlist) => playlist.specialType === 5
+      || /喜欢的音乐\s*$/.test(playlist.name));
+    if (!liked) throw new Error('未找到“喜欢的音乐”歌单');
+    return liked.id;
+  });
+  const playlistId = await context.likedPlaylistPromise;
+  return operation === 'del'
+    ? api.removePlaylistTracks(playlistId, [song.id], { signal: context.signal })
+    : api.addPlaylistTracks(playlistId, [song.id], { signal: context.signal });
+}
+
 async function playSong(api, song, context, rl, cachedLyrics = null) {
   const { signal, logger, authState, shutdown } = context;
   const result = await api.songUrl(song.id, { signal });
@@ -643,6 +658,9 @@ async function playSong(api, song, context, rl, cachedLyrics = null) {
     onOffsetChange: (value) => persistPlaybackOffset(
       context.settings, value, logger, 'playback_hotkey'
     ),
+    onFavorite: authState.loggedIn
+      ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
+      : undefined,
     onInterrupt: () => shutdown('playback_ctrl_c')
   });
   return lyrics;
@@ -869,6 +887,9 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     onOffsetChange: (value) => persistPlaybackOffset(
       context.settings, value, context.logger, 'playback_hotkey'
     ),
+    onFavorite: context.authState.loggedIn
+      ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
+      : undefined,
     onInterrupt: () => context.shutdown('playback_ctrl_c'),
     onTrackChange: async (targetIndex, cause, transitionSignal) => {
       const step = targetIndex < activeIndex ? -1 : 1;

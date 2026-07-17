@@ -217,6 +217,32 @@ export class NcmApi {
     };
   }
 
+  async updatePlaylistTracks(playlistId, songIds, operation = 'add', options = {}) {
+    const tracks = (Array.isArray(songIds) ? songIds : [songIds]).map(String).filter(Boolean);
+    if (!tracks.length) throw new Error(operation === 'del' ? '没有可删除的歌曲' : '没有可添加的歌曲');
+    const { data } = await this.request('/playlist/tracks', {
+      op: operation, pid: playlistId, tracks: tracks.join(',')
+    }, options);
+    // API Enhanced 的反向代理可能把上游响应放在 body 中，也可能直接返回上游响应。
+    const payload = data?.body && typeof data.body === 'object' ? data.body : data;
+    const code = Number(payload?.code);
+    const message = String(payload?.message || '');
+    const alreadyPresent = operation === 'add' && code === 502 && /重复|已存在/.test(message);
+    if (code !== 200 && !alreadyPresent) {
+      const action = operation === 'del' ? '从歌单删除歌曲' : '添加歌曲至歌单';
+      throw new Error(message || `${action}失败（code=${payload?.code ?? 'unknown'}）`);
+    }
+    return { code, playlistId: String(playlistId), tracks, alreadyPresent };
+  }
+
+  async addPlaylistTracks(playlistId, songIds, options = {}) {
+    return this.updatePlaylistTracks(playlistId, songIds, 'add', options);
+  }
+
+  async removePlaylistTracks(playlistId, songIds, options = {}) {
+    return this.updatePlaylistTracks(playlistId, songIds, 'del', options);
+  }
+
   async songUrl(id, options = {}) {
     const attempts = [];
     for (const [endpoint, params] of [

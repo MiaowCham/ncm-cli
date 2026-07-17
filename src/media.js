@@ -193,6 +193,7 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
   if (key.toLowerCase() === 'p') return { type: 'toggle_playlist' };
   if (key.toLowerCase() === 's') return { type: 'cycle_random_mode' };
   if (key.toLowerCase() === 'l') return { type: 'cycle_loop_mode' };
+  if (key.toLowerCase() === 'f') return { type: 'favorite' };
   if (playlistOpen && key === '\u001b') return { type: 'close_playlist' };
   if (playlistOpen && (key === '\r' || key === '\n')) return { type: 'playlist_select', index: playlistSelection };
   if (key === ' ') return { type: 'toggle_pause' };
@@ -478,8 +479,9 @@ export function shuffledPlaylistOrder(length, currentIndex, random = Math.random
   return length ? [currentIndex, ...rest] : [];
 }
 
-export function playbackShortcutText() {
-  return 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译  r 刷新';
+export function playbackShortcutText({ canFavorite = false, favorited = false } = {}) {
+  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译  r 刷新';
+  return canFavorite ? `${base}  f ${favorited ? '取消收藏' : '收藏'}` : base;
 }
 
 export function playbackPlaylistModeText({ randomLabel, loopLabel, playlistOpen = false } = {}) {
@@ -617,7 +619,9 @@ function renderDynamic({
   playlistOpen,
   playlistSelection,
   playbackModeText,
-  currentLyricOnly = false
+  currentLyricOnly = false,
+  canFavorite = false,
+  favorited = false
 }) {
   const columns = Math.max(1, process.stdout.columns || 80);
   const rows = Math.max(1, process.stdout.rows || 24);
@@ -638,7 +642,7 @@ function renderDynamic({
         playlistOpen: playbackModeText.playlistOpen
       }, columns).map((row) => chalk.magentaBright(row))
     : [];
-  const shortcutRows = playbackShortcutRows({}, columns).map((row) => chalk.cyanBright(row));
+  const shortcutRows = playbackShortcutRows({ canFavorite, favorited }, columns).map((row) => chalk.cyanBright(row));
   // 快捷键始终保留；控制结果占用快捷键和歌词之间原本的空行。
   const fixedChromeRows = 1 + modeRows.length + 1;
   const visibleShortcutRows = shortcutRows.slice(0, Math.max(0, availableRows - fixedChromeRows));
@@ -852,7 +856,8 @@ export async function playWithProgress({
   rl,
   onInterrupt,
   onOffsetChange,
-  onTrackChange
+  onTrackChange,
+  onFavorite
 }) {
   await closeRetainedSmtc();
   let player = findPlayer(playerCommandsForBackend(playerBackend));
@@ -873,6 +878,8 @@ export async function playWithProgress({
   let showTranslation = hasTranslation;
   let indicator = '';
   let indicatorUntil = 0;
+  let favoritePending = false;
+  const favoritedSongIds = new Set();
   const playlistTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
   let playlistCurrentIndex = playlistTracks.length
     ? clamp(Math.floor(Number(playlist?.currentIndex) || 0), 0, playlistTracks.length - 1)
@@ -1057,7 +1064,9 @@ export async function playWithProgress({
       playbackModeText: playlistTracks.length
         ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen }
         : '',
-      currentLyricOnly: String(activeSong?.id ?? '') === '405372425'
+      currentLyricOnly: String(activeSong?.id ?? '') === '405372425',
+      canFavorite: typeof onFavorite === 'function',
+      favorited: favoritedSongIds.has(String(activeSong?.id ?? ''))
     });
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
     refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, userPaused, activeOffsetMs), indicatorDelay));
@@ -1382,6 +1391,32 @@ export async function playWithProgress({
       setIndicator(`循环模式：${loopLabels[loopMode]}`);
       updateSmtcControls();
       render();
+      return;
+    }
+    if (action.type === 'favorite' && typeof onFavorite === 'function') {
+      const songSnapshot = activeSong;
+      const songId = String(songSnapshot?.id ?? '');
+      if (!songId || favoritePending) return;
+      const removing = favoritedSongIds.has(songId);
+      favoritePending = true;
+      setIndicator(removing ? '正在取消收藏…' : '正在收藏当前歌曲…');
+      render();
+      void Promise.resolve(onFavorite(songSnapshot, removing ? 'del' : 'add')).then((result) => {
+        if (removing) {
+          favoritedSongIds.delete(songId);
+          setIndicator('已从喜欢的音乐中移除');
+        } else {
+          favoritedSongIds.add(songId);
+          setIndicator(result?.alreadyPresent ? '当前歌曲已在喜欢的音乐中' : '已添加至喜欢的音乐');
+        }
+        render();
+      }, (error) => {
+        if (error?.name !== 'AbortError') {
+          void logger?.warn('favorite_song_failed', { songId, error });
+          setIndicator(`收藏失败：${error?.message || '未知错误'}`);
+          render();
+        }
+      }).finally(() => { favoritePending = false; });
       return;
     }
     if (action.type === 'toggle_pause' || action.action === 'play' || action.action === 'pause') {

@@ -1,175 +1,221 @@
 # NCM CLI 点歌台
 
-一个基于 [neteasecloudmusicapienhanced/api-enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced) 的简单交互式点歌 CLI，支持歌曲搜索、歌词内容搜索、ID 直达、扫码登录或 Cookie 登录、歌词、播放链接、封面降级显示，以及带进度条和逐行歌词的本机播放。
+[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)](https://github.com/search?q=repo%3AMiaowCham%2FCodex_Limit_Widget++language%3AC%23&type=code)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/MiaowCham/ncm-cli/blob/main/LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/MiaowCham/ncm-cli)](https://github.com/MiaowCham/ncm-cli/commits/main)
+
+一个运行在终端中的网易云音乐播放器。支持歌曲与歌词搜索、歌单浏览、扫码或 Cookie 登录、逐行歌词、封面显示、播放列表，以及 mpv、VLC 和 ffplay 播放后端。
+
+> [!NOTE]
+> 本项目由 OpenAI Codex 制作，依赖 [NeteaseCloudMusicApi Enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced)。首次启动时需要填写由该项目部署的 API 地址。
+
+## 功能
+
+- 搜索歌曲或歌词，支持歌曲 ID 直达
+- 浏览歌曲与歌单详情，滚动选择并播放歌曲
+- 显示逐行歌词、翻译歌词和歌词预览
+- 支持 SIXEL、Kitty、iTerm2、字符画等终端图片协议
+- 支持二维码登录、Cookie 登录和登录状态查询
+- 登录后可在播放页收藏歌曲，再次按键可取消收藏
+- 支持纯随机、打乱列表、列表循环和单曲循环
+- 使用 mpv 或 VLC 时提供常驻播放器控制与系统媒体控制
+- 导出歌词或歌单为文本、LRC、CSV 和 TSV
 
 ## 安装与运行
 
-要求 Node.js 22+，播放功能还需安装以下任一播放器并加入 `PATH`：`mpv`、`vlc`、`ffplay`。推荐安装 `mpv`；程序也支持 VLC oldrc。两者都会复用常驻播放器，暂停、跳转、音量调整和切歌无需重启进程。优先级为 `mpv → VLC → ffplay`；常驻控制接口无法初始化时会自动回退到后续播放器或 VLC/ffplay 兼容模式。VLC 的 RC 跳转精度为整数秒。
+需要 Node.js 22 或更高版本，并安装以下任一播放器：
 
-Windows 下会在 `npm install` 时尝试使用 .NET 8 SDK 构建 SMTC helper；未安装 SDK 时不会阻止安装或普通播放，但 SMTC 不可用。安装 SDK 后可随时执行 `npm run build:smtc`。如需生成不依赖目标机 .NET Runtime 的 helper，可在构建前设置 `NCM_SMTC_SELF_CONTAINED=1`。
+- `mpv`（推荐）
+- `vlc`
+- `ffplay`
 
-Windows Terminal 1.22+ 用户若安装了 `chafa`，封面会优先通过原生 SIXEL 图形显示；Kitty/iTerm2 兼容终端则优先使用各自的原生图形协议。未确认协议支持或编码失败时，程序会安全降级到 `chafa` 字符图和内置 ANSI 24-bit 半块字符，不会盲发图形控制序列；无需另装 `img2sixel`。
-
-可用 `/image` 交互选择封面图片协议，或使用 `/image auto|sixel|kitty|iterm2|symbols|ansi|none` 直接设置。`sixel` 适用于 Windows Terminal 1.22+；显式选择后会绕过易受安装方式影响的版本探测，直接使用 `chafa` 尝试 SIXEL，实际编码失败时才降级到 ANSI。`none` 关闭封面显示。该设置不影响登录二维码，二维码始终优先使用字符画。
+播放器需要加入 `PATH`。自动选择顺序为 `mpv → VLC → ffplay`。
 
 ```bash
 npm install
 npm start
 ```
 
-也可安装为全局命令：
+也可以安装为全局命令：
 
 ```bash
 npm install -g .
 ncm
 ```
 
-首次启动且尚未保存设置时，程序会要求填写 API 地址并保存到 `settings.json`，不再使用硬编码的默认服务。程序仅兼容
-[neteasecloudmusicapienhanced/api-enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced)
-提供的 API，请填写由该项目部署的服务地址。
+> [!NOTE]
+> Windows 下，`npm install` 会尝试使用 .NET 8 SDK 构建 SMTC helper。缺少 SDK 不会影响普通播放；安装 SDK 后可运行 `npm run build:smtc` 补充构建。
 
-设置 `NCM_API_BASE_URL` 可仅对本次启动覆盖已保存地址；非交互式调用若尚未配置，则必须提供该环境变量。
-交互界面可使用 `/api` 查看并输入新地址，或使用 `/api <url>` 直接保存并立即切换。切换后程序会重新验证当前
-Cookie 在新服务上的登录状态；若服务暂时无法连接，用户明确保存的地址仍会保留。
+首次启动会要求填写 API 地址并保存至 `settings.json`。也可通过环境变量临时指定：
 
-## 操作
+```bash
+NCM_API_BASE_URL=https://your-api.example.com npm start
+```
 
-启动后直接输入歌曲名或“歌手 歌名”搜索，再输入结果序号。
-输入斜杠命令或参数前缀后按 `Tab` 可自动补全；支持命令名、音质等级、歌词格式和 `/login status`。
-普通歌曲搜索结果在交互式终端中使用 ↑/↓ 或滚轮选择，按 Enter 查看详情，按空格可跳过详情直接播放，按 `q`/`Esc` 返回主页。从歌曲详情退出后也会直接回到主页，不再重新显示上一次搜索结果。非交互模式仍支持数字选择。滚动列表的标题和操作提示使用高亮配色，便于在深色终端中阅读。
-普通歌曲搜索和歌词搜索默认返回 30 条结果。该数量保存为 `settings.json` 中的 `searchLimit`（有效范围 1–100）；目前暂未提供对应命令，需要时可在程序退出后手动修改该设置。
+Windows PowerShell：
+
+```powershell
+$env:NCM_API_BASE_URL = 'https://your-api.example.com'
+npm start
+```
+
+## 基本操作
+
+启动后直接输入歌曲名、`歌手 歌名`，或使用歌曲 ID：
 
 ```text
 海阔天空
 id:347230
 ID=347230
 id 347230
-/id <id>
-/lspl
-/pl <id>
-/api
-/api https://your-api.example.com
-/player
-/player auto
-/player mpv
-/clear
-/lyric 风雨里追赶
-歌词:风雨里追赶
+/id 347230
 ```
 
-使用 `/player` 可查看并选择播放器后端；也可用 `/player auto|mpv|vlc|ffplay` 直接保存。`auto` 按 `mpv → VLC → ffplay` 选择，指定具体后端后不会跨播放器回退，但 mpv/VLC 的常驻控制初始化失败时仍可使用同一播放器的兼容模式。设置从下一次播放开始生效。
+交互列表支持：
 
-已登录用户可用 `/lspl` 列出自己的歌单，“喜欢的音乐”会置顶显示。在交互式终端中可用 ↑/↓ 或滚轮滚动选择，按 Enter 进入歌单详情，按 q 或 Esc 返回主页。歌单详情及歌单播放器中按 q 也会直接回到主页，不再返回 `/lspl` 列表。非交互式终端仍可输入序号选择。也可用 `/pl <id>` 直接预览指定歌单。歌单详情显示创建者、歌曲数、播放量、描述及前 15 首歌曲，并提供以下操作：
+| 按键 | 操作 |
+|---|---|
+| `↑` / `↓`、滚轮 | 移动选择 |
+| `Enter` | 查看详情或确认 |
+| `Space` | 直接播放歌曲 |
+| `d` | 在歌单歌曲列表中查看歌曲详情 |
+| `q` / `Esc` | 返回 |
+
+输入斜杠命令或参数前缀后按 `Tab` 可以自动补全。
+
+## 常用命令
+
+| 命令 | 说明 |
+|---|---|
+| `/lspl` | 查看当前用户的歌单 |
+| `/pl <id>` | 查看指定歌单 |
+| `/lyric <内容>` | 按歌词内容搜索 |
+| `/idlyric <id>` | 按歌曲 ID 获取歌词 |
+| `/login` | 二维码登录 |
+| `/login <Cookie>` | Cookie 登录 |
+| `/login status` | 查看登录状态 |
+| `/signout` | 退出登录 |
+| `/quality [level]` | 查看或设置音质 |
+| `/player [backend]` | 查看或设置播放器后端 |
+| `/image [protocol]` | 查看或设置图片协议 |
+| `/offset [毫秒]` | 查看或设置播放时间偏移 |
+| `/smtcoffset [毫秒]` | 查看或设置 SMTC 额外偏移 |
+| `/api [url]` | 查看或更换 API 地址 |
+| `/clear` | 清空终端内容 |
+
+播放器后端支持 `auto`、`mpv`、`vlc`、`ffplay`；图片协议支持 `auto`、`sixel`、`kitty`、`iterm2`、`symbols`、`ansi`、`none`。
+
+音质可选值：
 
 ```text
-p                       从第一首开始播放歌单
-l                       滚动选择歌曲，Enter 或空格开始播放，d 查看详情
-e                       选择格式并导出完整歌曲列表
-u                       打印网易云歌单链接和封面链接
-q                       返回上一级
+standard  higher  exhigh  lossless  hires
+jyeffect  sky     dolby   jymaster
 ```
 
-歌曲与歌单详情使用独立终端页面，快捷键静默响应且无需回车，窗口尺寸变化时会自动重新排版。歌曲详情会在中部按可用高度显示歌词预览，`l` 用于歌词导出。歌词和歌单导出操作从底部向上精确覆盖操作区，结束后在底部显示 1.5 秒结果提示，再恢复详情。链接键是展示开关：开启后提示符上移并在底部持续显示两行链接，再次按链接键或使用其他快捷键时关闭。歌单导出会显示格式菜单：`1` 仅歌曲（每行一个歌曲名）、`2` 当前方案（歌单信息和歌曲详情）、`3` CSV、`4` TSV。CSV/TSV 的字段为序号、歌曲、歌手、专辑、ID。不写管道符、或只写 `>`/`|` 时，会在当前目录自动命名；也可在符号后指定文件或目录。目录不存在时会创建，自动文件重名时追加序号，显式文件不会被覆盖。歌单播放会自动播放下一首，并跳过当前账号无法取得播放链接的歌曲。
+实际可用音质取决于账号权限和歌曲资源。
 
-歌词命令分为两种：
+## 歌单与歌曲详情
+
+登录后使用 `/lspl` 查看自己的歌单，“喜欢的音乐”会置顶显示。歌单详情快捷键：
+
+| 按键 | 操作 |
+|---|---|
+| `p` | 从第一首开始播放歌单 |
+| `l` | 打开歌曲列表，按 `Enter` 或空格播放 |
+| `e` | 导出完整歌曲列表 |
+| `u` | 显示或隐藏歌单与封面链接 |
+| `q` | 返回上一级 |
+
+歌曲详情快捷键：
+
+| 按键 | 操作 |
+|---|---|
+| `p` | 进入播放页 |
+| `l` | 导出歌词 |
+| `u` | 显示或隐藏播放与封面链接 |
+| `q` | 返回上一级 |
+
+详情页会根据终端尺寸自动调整封面、歌词和歌单预览长度。快捷键直接响应，无需按回车。
+
+## 播放控制
+
+| 按键 | 操作 |
+|---|---|
+| `Space` | 暂停或继续 |
+| `←` / `→` | 后退或前进 5 秒 |
+| `↑` / `↓` | 调整音量 |
+| `Ctrl+↑` / `Ctrl+↓` | 以 50 ms 调整播放时间偏移 |
+| `t` | 开关翻译歌词 |
+| `f` | 收藏或取消收藏当前歌曲（仅登录后显示） |
+| `r` | 刷新播放页面 |
+| `q` | 停止播放并返回 |
+| `Ctrl+C` | 退出程序 |
+
+播放歌单时还有以下操作：
+
+| 按键 | 操作 |
+|---|---|
+| `p` | 打开或关闭播放列表 |
+| `Ctrl+←` / `Ctrl+→` | 上一首或下一首 |
+| `s` | 切换不随机、纯随机、打乱列表 |
+| `l` | 切换顺序播放、列表循环、单曲循环 |
+
+mpv 和 VLC 会尽量复用常驻播放器，使暂停、跳转、音量和切歌无需重启进程；初始化失败时会安全降级。VLC RC 的跳转精度为整数秒。
+
+Windows 下会向 SMTC 发布标题、歌手、专辑、封面、播放状态和时间线，并接受系统媒体面板的播放、暂停、停止、跳转及歌单切歌操作。
+
+## 终端图片
+
+封面显示会按环境尝试原生图片协议，并在失败时降级：
+
+1. Windows Terminal 1.22+：通过 `chafa` 输出 SIXEL
+2. Kitty / iTerm2：使用对应原生协议
+3. `chafa` 字符图
+4. 内置 ANSI 24-bit 半块字符
+
+使用 `/image` 可以交互选择协议。此设置不影响登录二维码，二维码始终优先使用字符画。
+
+> [!NOTE]
+> Windows Terminal 若要直接显示图像，需要 Windows Terminal 1.22+，并确保 `chafa` 已安装且可从 `PATH` 调用。
+
+## 导出歌词与歌单
+
+歌词格式支持 `plain`、`lrc`、`trans` 和 `all`：
 
 ```text
-/idlyric <id>                         ID 直出，默认纯歌词
-/idlyric <id> lrc                     输出原始 LRC
-/idlyric <id> all > lyrics.lrc        合并原文/翻译并写入文件
-
-/lyric 风雨里追赶                    按歌词内容搜索，再选择歌曲和格式
-/lyric 风雨里追赶 trans              选择歌曲后直接输出翻译 LRC
-/lyric 风雨里追赶 lrc > lyrics.lrc   选择歌曲后写入原始 LRC
+/idlyric 347230
+/idlyric 347230 lrc
+/idlyric 347230 all > lyrics.lrc
+/lyric 风雨里追赶 trans
 ```
 
-歌词格式为 `plain`、`lrc`、`trans`、`all`。歌词搜索结果支持 `1 > output.lrc` 或 `1 | output.lrc`；未在命令中指定格式时，会继续显示格式菜单，格式选项同样支持 `1 > output.lrc` 或 `1 | output.lrc`。所有结果、详情和格式菜单均可输入 `q` 返回上一级。
+歌单可导出为：
 
-登录：
+1. 仅歌曲名
+2. 歌单信息与歌曲详情
+3. CSV
+4. TSV
 
-```text
-/login
-/login MUSIC_U=你的值; __csrf=你的值
-/login status
-/signout
-```
+输出目标既可以是文件，也可以是目录。省略目标、只输入 `>` 或 `|` 时，会在当前目录自动创建文件；目录不存在时会自动创建，自动生成的文件若重名会追加序号。
 
-无参数 `/login` 始终打印登录链接，然后按“字符二维码 → 与封面相同的图像渲染 → 仅链接”降级。登录成功后 Cookie 会清理为标准 Cookie Header 格式并缓存到操作系统的用户配置目录；旧版缓存会在启动时自动迁移。后续每个 API 请求都会携带 Cookie header。`/login status` 会向服务端验证状态，并在接口返回相应字段时显示昵称、用户 ID、账号 ID、等级、会员类型、累计听歌及关注信息，绝不显示 Cookie。`/signout` 会尝试通知服务端退出，并可靠地清除内存及磁盘 Cookie；重复执行也是安全的。可用 `NCM_CLI_CONFIG_DIR` 自定义缓存目录。
-
-播放音质可交互选择或直接设置，并单独持久化到 `settings.json`，不会覆盖 Cookie：
-
-```text
-/quality
-/quality lossless
-```
-
-播放展示时间默认向后偏移 `2000` 毫秒，以补偿播放输出与界面时间之间的延迟。偏移会统一作用于进度条、歌词和 SMTC 时间线；SMTC 进度跳转会自动换算回真实音频位置。使用 `/offset`
-查看当前值并交互设置，或直接提供整数毫秒；负数会让展示时间提前。允许范围为
-`-60000` 到 `60000` 毫秒，设置会与音质一起保存到 `settings.json`：
-
-```text
-/offset
-/offset 2500
-/offset -500
-```
-
-SMTC 还可以单独叠加一个额外偏移，默认 `0` 毫秒，只影响系统媒体控制的时间线与跳转换算，
-不会改变终端进度和歌词。它会在普通 `/offset` 的基础上叠加，允许范围同样为 `-60000`
-到 `60000` 毫秒，并持久化到 `settings.json`：
-
-```text
-/smtcoffset
-/smtcoffset 250
-/smtcoffset -100
-```
-
-输入 `/clear` 可清空当前终端内容并回到主搜索提示，不会退出程序或清除登录状态。
-
-方向键历史记录只保存主页中的搜索和命令；歌曲详情、歌单详情、歌词格式、登录及设置子界面的选择不会写入历史。
-
-支持 `standard`（标准）、`higher`（较高）、`exhigh`（极高）、`lossless`（无损）、`hires`（Hi-Res）、`jyeffect`（高清环绕声）、`sky`（沉浸环绕声）、`dolby`（杜比全景声）、`jymaster`（超清母带）。实际可用音质仍取决于账号会员权限和歌曲资源。
-
-选中歌曲后可使用：
-
-```text
-p                       进入全屏播放页
-l                       选择纯歌词、原始 LRC、翻译 LRC 或合并 LRC
-l                       进入歌词格式菜单，可在格式选择后指定输出文件
-u                       打印播放链接和封面链接
-q                       返回上一级
-```
-
-封面依次尝试已确认支持的原生终端图形协议（Windows Terminal 1.22+ 使用 `chafa` 编码 SIXEL，Kitty/iTerm2 使用对应协议）、`chafa` 字符图和内置 ANSI 24-bit 半块字符，失败时静默跳过。目标文件已存在时程序会拒绝覆盖。播放链接可能因登录状态、会员、地区或版权限制为空，这是上游 API/网易云权限限制。
-
-歌曲详情会先显示尺寸稍大的封面，再显示元数据；封面无法渲染时保持静默，不再打印链接。
-
-播放页使用终端独立全屏缓冲区，只在进入时绘制一次封面和元数据，下方显示进度、快捷键与多行歌词。快捷键提示在窄窗口中会以完整操作项为单位分段换行，不会从操作项中间断开。已播放歌词为白色，未播放歌词为淡灰色，可见行数会按终端高度裁剪：
-
-播放控制会先立即更新状态和快捷键指示，再异步处理外部播放器；连续音量或跳转输入会合并后应用，避免为每次按键累计播放器重启。
-
-```text
-q       停止播放并返回歌曲详情
-空格    暂停/继续
-← / →   后退/前进 5 秒
-↑ / ↓   提高/降低音量
-Ctrl+↑/↓ 每次增加/减少 50ms 播放时间偏移，并立即保存
-t       开关翻译歌词
-r       刷新播放页面（不改变播放状态）
-Ctrl+C  退出程序
-```
-
-播放歌单时按 `p` 可打开/关闭播放列表，以歌词区域浏览歌曲并用 `↑ / ↓` 或鼠标滚轮移动选择、`Enter` 跳转播放；`Ctrl+← / Ctrl+→` 切换上一首或下一首。按 `s` 依次切换“不随机、纯随机、打乱列表”，按 `l` 依次切换“顺序播放、列表循环、单曲循环”，两组模式相互独立。关闭播放列表后，仅键盘上下键调整音量，滚轮不会改变音量。
-
-进度默认每秒刷新一次；如果下一行歌词将在一秒内开始，会在该时间点额外刷新。
-
-Windows 播放时会向 SMTC 发布标题、艺术家、专辑、封面、播放状态和应用普通偏移及 SMTC 额外偏移后的时间线，并接受系统的播放、暂停、停止、快进、后退与进度条跳转控制。歌单播放会在同一 SMTC 会话内原地切歌，并按当前位置启用系统上一首/下一首按钮。歌曲自然结束后会保留最后的媒体信息和时间线；单曲不再响应系统控制，歌单仍可通过上一首/下一首继续播放。helper 缺失或初始化失败时会自动降级，不影响终端播放控制。
-
-也支持真正的 shell 管道/重定向；此模式只向标准输出写歌词正文：
+也支持真正的 Shell 管道和重定向：
 
 ```bash
 ncm idlyric 347230 > lyrics.txt
 ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 ```
+
+## 配置
+
+默认配置存放在操作系统的用户配置目录，可通过 `NCM_CLI_CONFIG_DIR` 修改位置。
+
+- `NCM_API_BASE_URL`：临时覆盖 API 地址
+- `NCM_CLI_CONFIG_DIR`：自定义配置目录
+- `NCM_CLI_LOG_FILE`：自定义日志路径
+- `NCM_CLI_LOG_LEVEL`：`debug`、`info`、`warn` 或 `error`
+- `NCM_SMTC_SELF_CONTAINED=1`：构建独立运行的 Windows SMTC helper
+
+普通播放时间偏移默认是 `2000 ms`，同时作用于进度条、歌词和 SMTC 时间线。`/smtcoffset` 设置的额外偏移只影响 SMTC。两者范围均为 `-60000` 至 `60000 ms`。
 
 ## 测试
 
@@ -178,22 +224,31 @@ npm test
 npm run test:live
 ```
 
-`npm test` 不访问网络；`npm run test:live` 会访问配置的 API 服务。
+`npm test` 不访问网络；`npm run test:live` 会连接已配置的 API 服务。
 
-## 退出与日志
+## 日志
 
-在主提示、登录轮询、网络请求或播放过程中按 `Ctrl+C`，程序会取消当前操作、终止播放器并以退出码 `130` 退出。
-
-默认日志为脱敏 JSONL，不记录 Cookie、二维码数据、搜索词、歌词正文或完整媒体 URL：
+日志采用脱敏 JSONL，不记录 Cookie、二维码数据、搜索词、歌词正文或完整媒体 URL。
 
 - Windows：`%LOCALAPPDATA%\ncm-cli\logs\ncm-cli.log`
-- 其他系统：位于用户配置目录下的 `ncm-cli/logs/ncm-cli.log`
+- 其他系统：用户配置目录下的 `ncm-cli/logs/ncm-cli.log`
 
-日志按 `1 MiB × 5` 轮转。可用 `NCM_CLI_LOG_FILE` 自定义路径、`NCM_CLI_LOG_LEVEL=debug|info|warn|error` 调整级别。
+日志按 `1 MiB × 5` 轮转。
 
 ## 安全说明
 
-- Cookie 是账号凭证，请勿提交到 Git、粘贴到公开日志或发给他人。
-- Cookie 文件按 `0600` 模式写入；Windows 上最终权限仍由用户目录 ACL 决定。
-- 歌词文件输出由程序直接写入，不经 shell 执行。
-- 本工具不绕过版权或会员限制，只使用 API 返回的播放地址。
+- Cookie 是账号凭证，请勿提交到 Git、公开日志或发送给他人。
+- 歌词和歌单文件由程序直接写入，不会交给 Shell 执行。
+- 本工具不会绕过版权、会员或地区限制，只使用 API 返回的播放地址。
+- 播放链接可能因账号权限、会员、地区或版权限制而不可用。
+
+## 致谢
+
+- [NeteaseCloudMusicApi Enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced)
+- [mpv](https://mpv.io/)
+- [VLC](https://www.videolan.org/vlc/)
+- [FFmpeg / ffplay](https://ffmpeg.org/)
+
+## 许可证
+
+本项目基于 MIT License 发布。
