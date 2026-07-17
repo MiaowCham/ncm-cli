@@ -7,7 +7,8 @@
 一个运行在终端中的网易云音乐播放器。支持歌曲与歌词搜索、歌单浏览、扫码或 Cookie 登录、逐行歌词、封面显示、播放列表，以及 mpv、VLC 和 ffplay 播放后端。
 
 > [!NOTE]
-> 本项目由 OpenAI Codex 制作，依赖 [NeteaseCloudMusicApi Enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced)。首次启动时需要填写由该项目部署的 API 地址。
+> 本项目由 OpenAI Codex 制作  
+> 依赖 [NeteaseCloudMusicApi Enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced)。首次启动时需要填写由该项目部署的 API 地址。
 
 ## 功能
 
@@ -251,4 +252,4 @@ npm run test:live
 
 ## 许可证
 
-本项目基于 MIT License 发布。
+本项目基于 [MIT License](https://github.com/MiaowCham/ncm-cli/blob/main/LICENSE) 发布。
