@@ -102,7 +102,6 @@ id 347230
 | `/player [backend]` | 查看或设置播放器后端 |
 | `/image [protocol]` | 查看或设置图片协议 |
 | `/offset [毫秒]` | 查看或设置播放时间偏移 |
-| `/smtcoffset [毫秒]` | 查看或设置 SMTC 额外偏移 |
 | `/api [url]` | 查看或更换 API 地址 |
 | `/clear` | 清空终端内容 |
 
@@ -182,6 +181,8 @@ Windows 下会向 SMTC 发布标题、歌手、专辑、封面、播放状态和
 > [!NOTE]
 > Windows Terminal 若要直接显示图像，需要 Windows Terminal 1.22+，并确保 `chafa` 已安装且可从 `PATH` 调用。
 
+为尽量还原 Credits EX 原作的 8×16 Linux 控制台字形，仓库提供了 Windows 可安装字体 [`NCM Credits VGA16 Bold`](assets/fonts/NCM-Credits-VGA16-Bold.ttf)。它由 Ubuntu 24.04 `console-setup-linux` 包中的 `FullCyrAsia-TerminusBoldVGA16.psf.gz` 转换而来；安装后可在 Windows Terminal 的配置中选择 `NCM Credits VGA16`。该字体依据 OFL-1.1 单独分发，来源与修改说明见 [`assets/fonts/NOTICE.md`](assets/fonts/NOTICE.md)。
+
 ## 导出歌词与歌单
 
 歌词格式支持 `plain`、`lrc`、`trans` 和 `all`：
@@ -219,7 +220,8 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 - `NCM_CLI_LOG_LEVEL`：`debug`、`info`、`warn` 或 `error`
 - `NCM_SMTC_SELF_CONTAINED=1`：构建独立运行的 Windows SMTC helper
 
-普通播放时间偏移默认是 `2000 ms`，同时作用于进度条、歌词和 SMTC 时间线。`/smtcoffset` 设置的额外偏移只影响 SMTC。两者范围均为 `-60000` 至 `60000 ms`。
+普通播放时间偏移默认是 `0 ms`，同时作用于进度条、歌词、Credits EX 彩蛋和 SMTC 时间线。配置字段 `smtcOffsetMs` 的额外偏移只影响 SMTC；该字段继续兼容已有配置，但不再提供斜杠命令。两者范围均为 `-60000` 至 `60000 ms`。
+Credits EX 在经过普通播放偏移校准后的前 `46800 ms` 显示包含封面、歌曲信息和控制区的完整播放器，随后以逐行 CRT 刷新效果切入彩蛋动画；到 `130000 ms`（`2:10`）再以相同效果切回完整播放器。两次切换约持续 1.5 秒，画面从上往下交叠替换，各行快速闪烁数次后稳定。该曲目在普通播放器和彩蛋阶段都只显示当前歌词及其翻译，不显示未播放歌词。
 
 ## 测试
 
@@ -252,7 +254,12 @@ npm run test:live
 - [mpv](https://mpv.io/)
 - [VLC](https://www.videolan.org/vlc/)
 - [FFmpeg / ffplay](https://ffmpeg.org/)
+- Credits EX 彩蛋移植自 MIT 项目 [frums-credits-cli-nosound](https://github.com/sititou70/frums-credits-cli-nosound)：保留原始 CSF 分镜与文本素材并实现兼容播放器，不包含其静音占位音频；详细归属见 [`assets/credits-csf/NOTICE.md`](assets/credits-csf/NOTICE.md)。
+- `NCM Credits VGA16` 字体改编自 Dimitar Toshkov Zhekov 创作的 Terminus Font，并通过 Ubuntu/Debian `console-setup` 分发；详细归属见 [`assets/fonts/NOTICE.md`](assets/fonts/NOTICE.md)。
 
 ## 许可证
 
-本项目基于 [MIT License](https://github.com/MiaowCham/ncm-cli/blob/main/LICENSE) 发布。
+除另有标注的第三方内容外，本项目代码基于 [MIT License](https://github.com/MiaowCham/ncm-cli/blob/main/LICENSE) 发布。
+
+- `assets/credits-csf/` 中移植的上游彩蛋素材适用该目录内 `NOTICE.md` 记录的 MIT 条款。
+- `assets/fonts/NCM-Credits-VGA16-Bold.ttf` 适用 [SIL Open Font License 1.1](assets/fonts/OFL.txt)，不适用仓库根目录的 MIT License。
