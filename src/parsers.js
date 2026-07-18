@@ -34,7 +34,9 @@ export const QUALITY_LEVELS = Object.freeze([
 ]);
 
 export const PLAYER_BACKENDS = Object.freeze(['auto', 'mpv', 'vlc', 'ffplay']);
-export const IMAGE_PROTOCOLS = Object.freeze(['auto', 'sixel', 'kitty', 'iterm2', 'symbols', 'ansi', 'none']);
+export const IMAGE_PROTOCOLS = Object.freeze([
+  'auto', 'sixel', 'kitty', 'iterm2', 'symbols', 'ansi', 'ansi256', 'none'
+]);
 
 export function parseQualityCommand(input) {
   const match = input.trim().match(/^\/quality(?:\s+([\s\S]+))?$/i);
