@@ -252,12 +252,10 @@ export class NcmApi {
       const action = operation === 'del' ? '从歌单删除歌曲' : '添加歌曲至歌单';
       throw new Error(message || `${action}失败（code=${payload?.code ?? 'unknown'}）`);
     }
-    if (this.cacheMaxBytes > 0) {
-      await Promise.all([
-        removeCachedData({ type: 'playlist-metadata', id: playlistId }),
-        removeCachedData({ type: 'playlist-tracks-metadata', id: playlistId })
-      ]);
-    }
+    await Promise.all([
+      removeCachedData({ type: 'playlist-metadata', id: playlistId }),
+      removeCachedData({ type: 'playlist-tracks-metadata', id: playlistId })
+    ]);
     return { code, playlistId: String(playlistId), tracks, alreadyPresent };
   }
 

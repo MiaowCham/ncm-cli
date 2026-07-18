@@ -60,6 +60,7 @@ export async function loadCachedLyrics(id, loader, options = {}) {
       void options.logger?.info('lyrics_local_file_hit', { songId: id, type, bytes: Buffer.byteLength(local) });
       return local;
     }
+    void options.logger?.info('lyrics_local_file_miss', { songId: id, type });
     try {
       return (await loadCachedData({ type, id }, {
         ...options, maxBytes: Infinity,

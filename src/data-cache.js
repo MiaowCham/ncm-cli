@@ -192,7 +192,7 @@ export async function loadCachedData(identity, {
     if (maxBytes > 0) touch(dataCachePath(identity, directory));
     void logger?.info('data_cache_hit', {
       layer: 'memory', type: identity.type, key: key.slice(0, 12),
-      variant: identity.variant ?? 'default', bytes: memoryHit.length
+      variant: identity.variant ?? 'default', bytes: memoryHit.length, path: dataCachePath(identity, directory)
     });
     return waitForConsumer(Promise.resolve(memoryHit), signal);
   }
@@ -208,7 +208,8 @@ export async function loadCachedData(identity, {
             const legacy = candidate !== primary;
             void logger?.info('data_cache_hit', {
               layer: legacy ? 'legacy-disk' : 'disk', type: identity.type,
-              key: key.slice(0, 12), variant: identity.variant ?? 'default', bytes: buffer.length
+              key: key.slice(0, 12), variant: identity.variant ?? 'default', bytes: buffer.length,
+              path: candidate
             });
             if (legacy) await store(primary, buffer, maxBytes, logger, directory);
             return buffer;
@@ -223,10 +224,11 @@ export async function loadCachedData(identity, {
         }
       }
       void logger?.info('data_cache_miss', {
-        type: identity.type, key: key.slice(0, 12), variant: identity.variant ?? 'default'
+        type: identity.type, key: key.slice(0, 12), variant: identity.variant ?? 'default',
+        path: dataCachePath(identity, directory), maxBytes
       });
       const buffer = Buffer.from(await loader());
-      if (!validate(buffer)) throw new Error('加载的缓存内容无效');
+      if (!validate(buffer)) throw Object.assign(new Error('加载的缓存内容无效'), { code: 'INVALID_CACHE' });
       remember(memoryId, buffer);
       await store(dataCachePath(identity, directory), buffer, maxBytes, logger, directory);
       return buffer;

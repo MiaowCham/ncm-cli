@@ -1044,7 +1044,15 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     if (index < 0 || index >= tracks.length) return Promise.resolve(null);
     if (cache.has(index)) return cache.get(index);
     const promise = (async () => {
-      const song = tracks[index];
+      const track = tracks[index];
+      let song = track;
+      try {
+        song = await api.songDetail(track.id, { signal: context.signal });
+        void context.logger.info('playlist_song_metadata_ready', { songId: song.id, index });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        void context.logger.warn('playlist_song_metadata_failed', { songId: track.id, index, error });
+      }
       let playbackUrl = await cacheSongMusic(song.id, null, {
         signal: context.signal, maxBytes: context.settings.cacheMaxBytes, logger: context.logger
       });
