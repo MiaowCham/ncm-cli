@@ -220,7 +220,7 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 - `NCM_CLI_LOG_LEVEL`：`debug`、`info`、`warn` 或 `error`
 - `NCM_SMTC_SELF_CONTAINED=1`：构建独立运行的 Windows SMTC helper
 
-普通播放时间偏移默认是 `2000 ms`，同时作用于进度条、歌词、Credits EX 彩蛋和 SMTC 时间线。配置字段 `smtcOffsetMs` 的额外偏移只影响 SMTC；该字段继续兼容已有配置，但不再提供斜杠命令。两者范围均为 `-60000` 至 `60000 ms`。
+普通播放时间偏移默认是 `0 ms`，同时作用于进度条、歌词、Credits EX 彩蛋和 SMTC 时间线。配置字段 `smtcOffsetMs` 的额外偏移只影响 SMTC；该字段继续兼容已有配置，但不再提供斜杠命令。两者范围均为 `-60000` 至 `60000 ms`。
 Credits EX 在经过普通播放偏移校准后的前 `46800 ms` 显示包含封面、歌曲信息和控制区的完整播放器，随后以逐行 CRT 刷新效果切入彩蛋动画；到 `130000 ms`（`2:10`）再以相同效果切回完整播放器。两次切换约持续 1.5 秒，画面从上往下交叠替换，各行快速闪烁数次后稳定。该曲目在普通播放器和彩蛋阶段都只显示当前歌词及其翻译，不显示未播放歌词。
 
 ## 测试
