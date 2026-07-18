@@ -18,6 +18,38 @@ export function dataCacheKey({ type, id, variant = 'default' }) {
   return createHash('sha256').update(`v1\0${values.join('\0')}`).digest('hex');
 }
 
+const NAMESPACE_TYPES = Object.freeze({
+  'track-cover': ['Covers', 'song', 'png'],
+  'playlist-cover': ['Covers', 'playlist', 'png'],
+  'song-music': ['Musics', 'song', 'cache'],
+  'song-lyrics': ['Lyrics', 'song', 'lrc']
+});
+
+function safePathPart(value, label) {
+  const part = String(value ?? '').trim();
+  if (!part || part === '.' || part === '..' || /[\\/\0]/.test(part)) {
+    throw new TypeError(`缓存 ${label} 无效`);
+  }
+  return part;
+}
+
+export function dataCachePath(identity, directory = dataCacheDirectory()) {
+  const mapped = NAMESPACE_TYPES[identity.type];
+  const [namespace, kind, extension] = mapped || [
+    safePathPart(identity.namespace || identity.type, 'namespace'),
+    safePathPart(identity.kind || 'item', 'kind'),
+    safePathPart(identity.extension || 'cache', 'extension')
+  ];
+  let id;
+  try {
+    id = safePathPart(identity.id, 'id');
+  } catch {
+    // URL-based temporary identities cannot be used as path components.
+    id = createHash('sha256').update(String(identity.id ?? '')).digest('hex');
+  }
+  return path.join(directory, namespace, kind, `${id}.${extension}`);
+}
+
 function scopedKey(directory, key) {
   return `${path.resolve(directory)}\0${key}`;
 }
@@ -50,17 +82,23 @@ function waitForConsumer(promise, signal) {
 }
 
 async function prune(directory, maxBytes, logger) {
-  let entries = [];
-  try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
   const files = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !/^[a-f0-9]{64}\.cache$/.test(entry.name)) continue;
-    const file = path.join(directory, entry.name);
-    try {
-      const info = await stat(file);
-      files.push({ file, size: info.size, mtimeMs: info.mtimeMs });
-    } catch {}
+  async function collect(current) {
+    let entries;
+    try { entries = await readdir(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const file = path.join(current, entry.name);
+      if (entry.isDirectory()) await collect(file);
+      else if (entry.isFile() && !entry.name.startsWith('.')
+          && /\.(?:png|cache|lrc)$/.test(entry.name)) {
+        try {
+          const info = await stat(file);
+          files.push({ file, size: info.size, mtimeMs: info.mtimeMs });
+        } catch {}
+      }
+    }
   }
+  await collect(directory);
   let totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   for (const file of files.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
     if (totalBytes <= maxBytes) break;
@@ -72,11 +110,10 @@ async function prune(directory, maxBytes, logger) {
   }
 }
 
-async function store(directory, key, buffer, maxBytes, logger) {
+async function store(target, buffer, maxBytes, logger, directory) {
   if (maxBytes <= 0 || buffer.length > maxBytes) return;
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const target = path.join(directory, `${key}.cache`);
-  const temporary = path.join(directory, `.${key}-${process.pid}-${Date.now()}.tmp`);
+  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  const temporary = path.join(path.dirname(target), `.${path.basename(target)}-${process.pid}-${Date.now()}.tmp`);
   try {
     await writeFile(temporary, buffer, { mode: 0o600 });
     try { await chmod(temporary, 0o600); } catch {}
@@ -95,9 +132,9 @@ async function readValid(file, validate) {
   return buffer;
 }
 
-function touch(directory, key) {
+function touch(file) {
   const now = new Date();
-  void utimes(path.join(directory, `${key}.cache`), now, now).catch(() => {});
+  void utimes(file, now, now).catch(() => {});
 }
 
 export function peekCachedData(identity, { directory = dataCacheDirectory() } = {}) {
@@ -107,7 +144,7 @@ export function peekCachedData(identity, { directory = dataCacheDirectory() } = 
     if (!buffer) return null;
     memory.delete(key);
     memory.set(key, buffer);
-    touch(directory, dataCacheKey(identity));
+    touch(dataCachePath(identity, directory));
     return buffer;
   } catch { return null; }
 }
@@ -128,7 +165,7 @@ export async function loadCachedData(identity, {
   if (memoryHit) {
     memory.delete(memoryId);
     memory.set(memoryId, memoryHit);
-    if (maxBytes > 0) touch(directory, key);
+    if (maxBytes > 0) touch(dataCachePath(identity, directory));
     void logger?.info('data_cache_hit', {
       layer: 'memory', type: identity.type, key: key.slice(0, 12),
       variant: identity.variant ?? 'default', bytes: memoryHit.length
@@ -139,7 +176,7 @@ export async function loadCachedData(identity, {
   if (!shared) {
     shared = (async () => {
       if (maxBytes > 0) {
-        const primary = path.join(directory, `${key}.cache`);
+        const primary = dataCachePath(identity, directory);
         for (const candidate of [primary, ...legacyFiles]) {
           try {
             const buffer = await readValid(candidate, validate);
@@ -149,7 +186,7 @@ export async function loadCachedData(identity, {
               layer: legacy ? 'legacy-disk' : 'disk', type: identity.type,
               key: key.slice(0, 12), variant: identity.variant ?? 'default', bytes: buffer.length
             });
-            if (legacy) await store(directory, key, buffer, maxBytes, logger);
+            if (legacy) await store(primary, buffer, maxBytes, logger, directory);
             return buffer;
           } catch (error) {
             if (!['ENOENT', 'INVALID_CACHE'].includes(error.code)) {
@@ -167,7 +204,7 @@ export async function loadCachedData(identity, {
       const buffer = Buffer.from(await loader());
       if (!validate(buffer)) throw new Error('加载的缓存内容无效');
       remember(memoryId, buffer);
-      await store(directory, key, buffer, maxBytes, logger);
+      await store(dataCachePath(identity, directory), buffer, maxBytes, logger, directory);
       return buffer;
     })().finally(() => inflight.delete(memoryId));
     inflight.set(memoryId, shared);

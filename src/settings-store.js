@@ -42,7 +42,7 @@ export async function loadSettings(file = settingsFilePath()) {
     } catch {
       apiBaseUrl = null;
     }
-    return {
+    const settings = {
       quality: QUALITY_LEVELS.includes(data.quality) ? data.quality : DEFAULT_QUALITY,
       playerBackend: PLAYER_BACKENDS.includes(data.playerBackend) ? data.playerBackend : DEFAULT_PLAYER_BACKEND,
       imageProtocol: IMAGE_PROTOCOLS.includes(data.imageProtocol) ? data.imageProtocol : DEFAULT_IMAGE_PROTOCOL,
@@ -53,9 +53,18 @@ export async function loadSettings(file = settingsFilePath()) {
       searchLimit: validSearchLimit(data.searchLimit) ? data.searchLimit : DEFAULT_SEARCH_LIMIT,
       apiBaseUrl
     };
+    const keys = Object.keys(settings);
+    const needsRepair = keys.some((key) => {
+      if (!(key in data)) return true;
+      return data[key] !== settings[key];
+    });
+    if (needsRepair) {
+      await writeSettingsFile(settings, file);
+    }
+    return settings;
   } catch (error) {
     if (error.code === 'ENOENT' || error instanceof SyntaxError) {
-      return {
+      const defaults = {
         quality: DEFAULT_QUALITY,
         playerBackend: DEFAULT_PLAYER_BACKEND,
         imageProtocol: DEFAULT_IMAGE_PROTOCOL,
@@ -65,9 +74,22 @@ export async function loadSettings(file = settingsFilePath()) {
         searchLimit: DEFAULT_SEARCH_LIMIT,
         apiBaseUrl: null
       };
+      if (error instanceof SyntaxError) await writeSettingsFile(defaults, file);
+      return defaults;
     }
     throw error;
   }
+}
+
+async function writeSettingsFile(settings, file) {
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await writeFile(file, `${JSON.stringify({ ...settings, updatedAt: new Date().toISOString() }, null, 2)}\n`, {
+    encoding: 'utf8', mode: 0o600
+  });
+  try { await chmod(file, 0o600); } catch {
+    // Windows 的 ACL 不完全映射 POSIX mode。
+  }
+  return file;
 }
 
 export async function saveSettings(settings, file = settingsFilePath()) {
@@ -89,15 +111,5 @@ export async function saveSettings(settings, file = settingsFilePath()) {
     throw new Error(`搜索返回数量必须是 ${MIN_SEARCH_LIMIT} 到 ${MAX_SEARCH_LIMIT} 之间的整数`);
   }
   if (next.apiBaseUrl != null) next.apiBaseUrl = normalizeApiBaseUrl(next.apiBaseUrl);
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await writeFile(file, `${JSON.stringify({ ...next, updatedAt: new Date().toISOString() }, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600
-  });
-  try {
-    await chmod(file, 0o600);
-  } catch {
-    // Windows 的 ACL 不完全映射 POSIX mode。
-  }
-  return file;
+  return writeSettingsFile(next, file);
 }
