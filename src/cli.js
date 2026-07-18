@@ -15,13 +15,14 @@ import { secondaryText } from './terminal-theme.js';
 import { resolveNeteaseMusicInput } from './music-link.js';
 import { writeExport } from './output-file.js';
 import { cleanupStalePlayerSessions } from './player-registry.js';
+import { creditsFontRecommendation } from './credits-csf.js';
 import {
   loadSettings, saveSettings, MIN_LYRIC_OFFSET_MS, MAX_LYRIC_OFFSET_MS
 } from './settings-store.js';
 import {
   normalizeCookie, parseIdCommand, parseLoginCommand,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
-  parseNumberSelection, parseOffsetCommand, parseSmtcOffsetCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
+  parseNumberSelection, parseOffsetCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
   parseListPlaylistsCommand, parsePlaylistCommand,
   parseApiCommand,
   IMAGE_PROTOCOLS, PLAYER_BACKENDS, QUALITY_LEVELS
@@ -67,7 +68,6 @@ ${chalk.bold('命令')}
   /player [auto|mpv|vlc|ffplay]           查看、选择或指定播放器后端
   /image [协议]                           查看、选择或指定终端图片协议
   /offset [毫秒]                          查看或设置播放时间偏移（默认 2000）
-  /smtcoffset [毫秒]                      查看或设置 SMTC 额外偏移（默认 0）
   /api [url]                              查看或更换 API 地址
   /clear                                  清空终端并返回搜索
   /help                                   显示帮助
@@ -438,42 +438,6 @@ async function handleOffset(rl, settings, command, signal, logger) {
   }
 }
 
-async function setSmtcOffset(settings, milliseconds, logger) {
-  if (!Number.isInteger(milliseconds)
-      || milliseconds < MIN_LYRIC_OFFSET_MS || milliseconds > MAX_LYRIC_OFFSET_MS) {
-    console.log(`SMTC 额外偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒。`);
-    return false;
-  }
-  await saveSettings({ ...settings, smtcOffsetMs: milliseconds });
-  settings.smtcOffsetMs = milliseconds;
-  void logger.info('smtc_offset_changed', { smtcOffsetMs: milliseconds });
-  console.log(`SMTC 额外偏移已设置为：${milliseconds} 毫秒（仅影响 SMTC）`);
-  return true;
-}
-
-async function handleSmtcOffset(rl, settings, command, signal, logger) {
-  if (command.error) {
-    console.log(`${command.error}；允许范围为 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS}。`);
-    return;
-  }
-  if (command.milliseconds !== null) {
-    await setSmtcOffset(settings, command.milliseconds, logger);
-    return;
-  }
-  console.log(`当前 SMTC 额外偏移：${settings.smtcOffsetMs} 毫秒`);
-  console.log(`SMTC 实际使用普通播放偏移 ${settings.lyricOffsetMs} 毫秒，再额外叠加此值。`);
-  while (true) {
-    const raw = (await ask(
-      rl,
-      `输入 SMTC 额外偏移毫秒（${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS}，q 返回）：`,
-      signal
-    )).trim();
-    if (/^q$/i.test(raw)) return;
-    if (/^[+-]?\d+$/.test(raw) && await setSmtcOffset(settings, Number(raw), logger)) return;
-    if (!/^[+-]?\d+$/.test(raw)) console.log('SMTC 额外偏移量必须是整数毫秒。');
-  }
-}
-
 async function handleLogin(rl, api, authState, signal, logger) {
   const key = await api.qrKey({ signal });
   const qr = await api.qrCreate(key, { signal });
@@ -705,7 +669,7 @@ async function songMenuInScreen(rl, api, song, context) {
       () => showSong(song, signal, context.settings.imageProtocol, cachedLyrics),
       () => detailFooterPrompt(
         chalk.yellow(songDetailPrompt({ loggedIn: authState.loggedIn, favorited })),
-        linksVisible ? songLinks : []
+        songDetailFooterLines(song, linksVisible ? songLinks : [])
       ),
       authState.loggedIn ? ['p', 'l', 'u', 'f', 'q'] : ['p', 'l', 'u', 'q'],
       context
@@ -767,6 +731,11 @@ async function songMenuInScreen(rl, api, song, context) {
 export function songDetailPrompt({ loggedIn = false, favorited = false } = {}) {
   const favorite = loggedIn ? ` [f]${favorited ? '取消收藏' : '收藏'}` : '';
   return `[p]播放 [l]歌词导出 [u]播放链接${favorite} [q]返回 > `;
+}
+
+export function songDetailFooterLines(song, lines = []) {
+  const recommendation = creditsFontRecommendation(song);
+  return recommendation ? [recommendation, ...lines] : [...lines];
 }
 
 function playlistCreatorName(playlist) {
@@ -1278,11 +1247,6 @@ async function resolveInput(rl, api, raw, context) {
   const offset = parseOffsetCommand(raw);
   if (offset) {
     await handleOffset(rl, context.settings, offset, signal, logger);
-    return;
-  }
-  const smtcOffset = parseSmtcOffsetCommand(raw);
-  if (smtcOffset) {
-    await handleSmtcOffset(rl, context.settings, smtcOffset, signal, logger);
     return;
   }
   const quality = parseQualityCommand(raw);

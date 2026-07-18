@@ -13,7 +13,16 @@ import { createVlcController } from './vlc-controller.js';
 import { hasProcessExited } from './process-state.js';
 import { guardPlayerProcess } from './process-guardian.js';
 import { acquireTerminalScreen } from './terminal-screen.js';
-import { primaryText, secondaryText } from './terminal-theme.js';
+import { primaryText, secondaryBackground, secondaryText } from './terminal-theme.js';
+import {
+  CREDITS_FONT_HINT_DURATION_MS,
+  creditsEasterEggFrame,
+  creditsEasterEggShowsFrame,
+  creditsEasterEggTimeline,
+  creditsFontRecommendation,
+  easterEggForSong
+} from './credits-csf.js';
+import { composeCreditsPlayerTransitionRows } from './credits-player-transition.js';
 
 let cachedWindowsTerminalVersion;
 let retainedSmtcBridge = null;
@@ -290,13 +299,16 @@ export function lyricPosition(elapsedMs, lyricOffsetMs = 2000) {
   return displayPosition(elapsedMs, Number.isFinite(offset) ? offset : 2000);
 }
 
-export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOffsetMs = 0) {
+export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOffsetMs = 0, animationIntervalMs = Infinity) {
   if (paused) return 1000;
   const toNextSecond = 1000 - (Math.floor(elapsedMs) % 1000 || 0);
   const lyricElapsedMs = lyricPosition(elapsedMs, lyricOffsetMs);
   const nextLyric = lyricLines.find((line) => line.timeMs > lyricElapsedMs);
   const toNextLyric = nextLyric ? nextLyric.timeMs - lyricElapsedMs : Infinity;
-  return clamp(Math.min(toNextSecond, toNextLyric), 20, 1000);
+  const animationDelay = Number.isFinite(Number(animationIntervalMs))
+    ? Math.max(16, Number(animationIntervalMs))
+    : Infinity;
+  return clamp(Math.min(toNextSecond, toNextLyric, animationDelay), 16, 1000);
 }
 
 function truncateText(text, width) {
@@ -515,17 +527,32 @@ export function playbackPlaylistModeRows(options = {}, width = 80) {
   return rows;
 }
 
-export function playbackProgressText({ bar, timeText, paused = false, columns = 80 } = {}) {
+export function playbackProgressText({ bar, timeText, paused = false, pauseText = '[已暂停]', columns = 80 } = {}) {
   const width = Math.max(1, columns);
-  const state = paused ? '[已暂停]' : '';
-  const full = `[${bar}]${state ? ` ${state}` : ''} ${timeText}`;
+  const state = paused ? pauseText : '';
+  const full = `${bar}${state ? ` ${state}` : ''} ${timeText}`;
   if (stringWidth(full) <= width) return full;
   if (paused) {
-    const compact = `[>] ${state}`;
+    const compact = `> ${state}`;
     if (stringWidth(compact) <= width) return compact;
     if (stringWidth(state) <= width) return state;
   }
   return truncateText(full, width);
+}
+
+const PROGRESS_BLOCKS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+
+export function playbackProgressSegments(ratio, width) {
+  const cells = Math.max(1, Math.floor(Number(width) || 1));
+  const eighths = Math.round(clamp(Number(ratio) || 0, 0, 1) * cells * 8);
+  const fullCells = Math.floor(eighths / 8);
+  const partial = PROGRESS_BLOCKS[eighths % 8];
+  const unplayedCells = Math.max(0, cells - fullCells - (partial ? 1 : 0));
+  return {
+    played: '█'.repeat(fullCells),
+    partial,
+    unplayed: ' '.repeat(unplayedCells)
+  };
 }
 
 export function shouldSyncPlayerPosition(localMs, playerSeconds, thresholdMs = 750) {
@@ -607,6 +634,13 @@ function playlistTrackText(track, index) {
   return `${index + 1}. ${title}${artists ? ` - ${artists}` : ''}`;
 }
 
+export function playbackDynamicRows({ progress, modeRows, shortcutRows, indicatorRow, contentRows, contentBeforeControls = false, availableRows = Infinity }) {
+  const ordered = contentBeforeControls
+    ? [...contentRows, progress, ...modeRows, ...shortcutRows, indicatorRow]
+    : [progress, ...modeRows, ...shortcutRows, indicatorRow, ...contentRows];
+  return ordered.slice(0, Math.max(0, availableRows));
+}
+
 function renderDynamic({
   elapsedMs,
   lyricElapsedMs,
@@ -622,8 +656,10 @@ function renderDynamic({
   playlistSelection,
   playbackModeText,
   currentLyricOnly = false,
+  easterEgg = null,
   canFavorite = false,
-  favorited = false
+  favorited = false,
+  captureOnly = false
 }) {
   const columns = Math.max(1, process.stdout.columns || 80);
   const rows = Math.max(1, process.stdout.rows || 24);
@@ -631,12 +667,20 @@ function renderDynamic({
   const availableRows = rows - startRow + 1;
   const timeText = `${formatTime(elapsedMs)} / ${formatTime(durationMs)}`;
   const pauseWidth = paused ? stringWidth(' [已暂停]') : 0;
-  const barWidth = clamp(columns - stringWidth(timeText) - pauseWidth - 5, 1, 50);
+  const barWidth = clamp(columns - stringWidth(timeText) - pauseWidth - 3, 1, 50);
   const ratio = durationMs ? clamp(elapsedMs / durationMs, 0, 1) : 0;
-  const filled = Math.round(ratio * barWidth);
-  const bar = `${'='.repeat(filled)}${filled < barWidth ? '>' : ''}${' '.repeat(Math.max(0, barWidth - filled - 1))}`;
-  const progressText = playbackProgressText({ bar, timeText, paused, columns });
-  const progress = paused ? chalk.yellow(progressText) : progressText;
+  const segments = playbackProgressSegments(ratio, barWidth);
+  const partial = segments.partial
+    ? secondaryBackground(primaryText(segments.partial))
+    : '';
+  const bar = `${primaryText(segments.played)}${partial}${secondaryBackground(segments.unplayed)}`;
+  const progress = playbackProgressText({
+    bar,
+    timeText,
+    paused,
+    pauseText: chalk.yellow('[已暂停]'),
+    columns
+  });
   const modeRows = playbackModeText
     ? playbackPlaylistModeRows({
         randomLabel: playbackModeText.randomLabel,
@@ -663,12 +707,15 @@ function renderDynamic({
     contentRows = lyricCapacity > 0
       ? [chalk.cyanBright.bold(title), ...(trackRows.length ? trackRows : [secondaryText('歌单为空')])].slice(0, lyricCapacity)
       : [];
+  } else if (easterEgg?.mode === 'credits-csf' && creditsEasterEggShowsFrame(easterEgg)) {
+    // 原始 CSF 使用终端默认色，不对上游分镜追加自定义样式。
+    contentRows = creditsEasterEggFrame(easterEgg.frameElapsedMs, columns, lyricCapacity);
   } else {
     const displayRows = playbackLyricRows(
       lyrics, lyricElapsedMs, lyricCapacity, showTranslation, columns, currentLyricOnly
     );
     contentRows = displayRows.length
-      ? displayRows.map((line) => {
+      ? displayRows.map((line, rowIndex) => {
           const text = truncateText(line.text, columns);
           const tone = lyricTone(line);
           if (tone === 'future') return secondaryText(text);
@@ -677,14 +724,18 @@ function renderDynamic({
         })
       : lyricCapacity > 0 ? [currentLyricOnly ? '' : secondaryText(truncateText('暂无逐行歌词', columns))] : [];
   }
-  const outputRows = [progress];
-  outputRows.push(...modeRows.slice(0, Math.max(0, availableRows - outputRows.length)));
-  outputRows.push(...visibleShortcutRows.slice(0, Math.max(0, availableRows - outputRows.length)));
-  if (outputRows.length < availableRows) {
-    outputRows.push(indicator ? chalk.yellow(truncateText(indicator, columns)) : '');
-  }
-  outputRows.push(...contentRows);
+  const creditsFrameVisible = easterEgg?.mode === 'credits-csf' && creditsEasterEggShowsFrame(easterEgg);
+  const outputRows = playbackDynamicRows({
+    progress,
+    modeRows,
+    shortcutRows: visibleShortcutRows,
+    indicatorRow: indicator ? chalk.yellow(truncateText(indicator, columns)) : '',
+    contentRows,
+    contentBeforeControls: creditsFrameVisible && !playlistOpen,
+    availableRows
+  });
   const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
+  if (captureOnly) return outputRows;
   process.stdout.write(`${position}\x1b[0J${outputRows.join('\n')}`);
 }
 
@@ -741,6 +792,43 @@ async function renderAnsiBlocks(buffer, maxWidth, maxRows) {
   return rows.join('\n');
 }
 
+function playbackMetadataRows(song, backendLabel, columns) {
+  const artists = Array.isArray(song.artists) ? song.artists.join('/') : song.artist;
+  return [
+    chalk.bold(truncateText(song.name || song.title || '', columns)),
+    truncateText(`歌手：${artists || '未知'}`, columns),
+    truncateText(`专辑：${song.album || '未知'}`, columns),
+    truncateText(`播放器：${backendLabel}`, columns),
+    truncateText(`ID：${song.id ?? ''}`, columns)
+  ];
+}
+
+async function buildTextPlaybackHeaderRows(song, { signal, backendLabel, columns, rows }) {
+  const coverRows = [];
+  if (song.cover && rows >= 10) {
+    try {
+      const buffer = await loadImage(song.cover, signal);
+      const width = Math.max(1, Math.min(52, columns - 2));
+      const height = Math.max(1, Math.min(20, Math.floor(rows * 0.36), rows - 8));
+      const text = await renderAnsiBlocks(buffer, width, height);
+      coverRows.push(...text.split(/\r?\n/));
+    } catch {}
+  }
+  const metadata = playbackMetadataRows(song, backendLabel, columns);
+  const metadataCapacity = Math.max(0, rows - coverRows.length - 1);
+  return [...coverRows, ...metadata.slice(0, metadataCapacity)];
+}
+
+function writeCreditsTransitionRows(entries) {
+  const output = entries.map(({ state, text }) => {
+    const rendered = state === 'flash-target'
+      ? chalk.inverse(chalk.whiteBright(text))
+      : state === 'target-preview' ? chalk.whiteBright(text) : text;
+    return `${rendered}\x1b[0m\x1b[K`;
+  }).join('\n');
+  process.stdout.write(`\x1b[H${output}`);
+
+}
 function writeTerminalOutput(output) {
   return new Promise((resolve, reject) => {
     process.stdout.write(output, (error) => error ? reject(error) : resolve());
@@ -915,6 +1003,9 @@ export async function playWithProgress({
   let headerRendering = false;
   let headerRenderId = 0;
   let headerAbortController = null;
+  let creditsPlayerHeaderRows = [];
+  let creditsTransitionHeaderRows = null;
+  let creditsFullPlayerActive = false;
   let dispatchPlaybackAction = () => {};
   let sessionControlsEnabled = true;
   let sessionEnded = false;
@@ -1042,6 +1133,12 @@ export async function playWithProgress({
     }
   };
 
+  const creditsPlayerTransitionActive = () => Boolean(
+    easterEggForSong(activeSong)
+    && creditsEasterEggTimeline(displayPosition(clock.position(), activeOffsetMs),
+      Math.max(1, process.stdout.rows || 24)).phase.endsWith('-transition')
+  );
+
   const render = () => {
     if (!tty || finished || headerRendering) return;
     if (refreshTimer) clearTimeout(refreshTimer);
@@ -1051,14 +1148,19 @@ export async function playWithProgress({
     const lyricElapsedMs = elapsedMs;
     const now = performance.now();
     if (indicator && now >= indicatorUntil) indicator = '';
-    renderDynamic({
+    const easterEggConfig = easterEggForSong(activeSong);
+    const easterEggTimeline = easterEggConfig
+      ? creditsEasterEggTimeline(lyricElapsedMs, Math.max(1, process.stdout.rows || 24)) : null;
+    const easterEgg = easterEggConfig ? {
+      ...easterEggConfig,
+      ...easterEggTimeline
+    } : null;
+    const renderOptions = {
       elapsedMs,
       lyricElapsedMs,
       durationMs: displayDurationMs,
       paused: userPaused,
       lyrics,
-      dynamicRow,
-      dynamicAnchored,
       showTranslation,
       indicator,
       playlist: playbackPlaylist,
@@ -1067,17 +1169,91 @@ export async function playWithProgress({
       playbackModeText: playlistTracks.length
         ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen }
         : '',
-      currentLyricOnly: String(activeSong?.id ?? '') === '405372425',
       canFavorite: typeof onFavorite === 'function',
       favorited: favoritedSongIds.has(String(activeSong?.id ?? ''))
-    });
+    };
+    const creditsTransitionActive = easterEgg?.phase?.endsWith('-transition');
+    if (creditsTransitionActive && !creditsTransitionHeaderRows) {
+      creditsTransitionHeaderRows = [...creditsPlayerHeaderRows];
+    }
+    const stableCreditsHeaderRows = creditsTransitionHeaderRows ?? creditsPlayerHeaderRows;
+    if (creditsTransitionActive) {
+      const terminalRows = Math.max(1, process.stdout.rows || 24);
+      const animationRows = renderDynamic({
+        ...renderOptions,
+        dynamicRow: 1,
+        dynamicAnchored: false,
+        currentLyricOnly: true,
+        easterEgg: { ...easterEgg, phase: 'animation' },
+        captureOnly: true
+      });
+      const playerDynamicRows = renderDynamic({
+        ...renderOptions,
+        dynamicRow: stableCreditsHeaderRows.length + 1,
+        dynamicAnchored: false,
+        currentLyricOnly: Boolean(easterEggConfig?.currentLyricOnly),
+        easterEgg: null,
+        captureOnly: true
+      });
+      const playerRows = [...stableCreditsHeaderRows, ...playerDynamicRows];
+      const enteringEasterEgg = easterEgg.phase === 'egg-transition';
+      creditsFullPlayerActive = enteringEasterEgg;
+      const entries = composeCreditsPlayerTransitionRows(
+        enteringEasterEgg ? playerRows : animationRows,
+        enteringEasterEgg ? animationRows : playerRows,
+        easterEgg.transitionElapsedMs,
+        terminalRows
+      );
+      writeCreditsTransitionRows(entries);
+    } else {
+      const creditsOrdinaryPlayer = ['player-intro', 'player'].includes(easterEgg?.phase);
+      if (creditsOrdinaryPlayer && !creditsFullPlayerActive) {
+        creditsFullPlayerActive = true;
+        creditsTransitionHeaderRows = null;
+        dynamicRow = Math.min(
+          Math.max(1, process.stdout.rows || 24),
+          stableCreditsHeaderRows.length + 1
+        );
+        dynamicAnchored = true;
+        const headerOutput = stableCreditsHeaderRows
+          .map((row) => `${row}\x1b[0m\x1b[K`).join('\n');
+        process.stdout.write(
+          `\x1b[H${headerOutput}${headerOutput ? '\n' : ''}\x1b[${dynamicRow};1H\x1b[s`
+        );
+      } else if (easterEgg?.phase === 'animation' && creditsFullPlayerActive) {
+        creditsFullPlayerActive = false;
+        creditsTransitionHeaderRows = null;
+        dynamicRow = 1;
+        dynamicAnchored = true;
+        process.stdout.write('\x1b[2J\x1b[H\x1b[s');
+      }
+      renderDynamic({
+        ...renderOptions,
+        dynamicRow,
+        dynamicAnchored,
+        currentLyricOnly: Boolean(easterEggConfig?.currentLyricOnly),
+        easterEgg: creditsOrdinaryPlayer ? null : easterEgg
+      });
+    }
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
-    refreshTimer = setTimeout(render, Math.min(nextRefreshDelay(rawElapsedMs, lyrics, userPaused, activeOffsetMs), indicatorDelay));
+    const easterEggPhaseDelay = easterEgg?.nextChangeDelayMs ?? Infinity;
+    refreshTimer = setTimeout(render, Math.min(
+      nextRefreshDelay(rawElapsedMs, lyrics, userPaused, activeOffsetMs, easterEgg?.refreshIntervalMs),
+      indicatorDelay,
+      easterEggPhaseDelay
+    ));
   };
 
-  const setIndicator = (text) => {
+  const setIndicator = (text, durationMs = 1200) => {
     indicator = text;
-    indicatorUntil = performance.now() + 1200;
+    indicatorUntil = performance.now() + Math.max(0, Number(durationMs) || 0);
+  };
+
+  const showCreditsFontRecommendation = () => {
+    const recommendation = creditsFontRecommendation(activeSong);
+    if (!recommendation) return false;
+    setIndicator(recommendation, CREDITS_FONT_HINT_DURATION_MS);
+    return true;
   };
 
   let operationQueue = Promise.resolve();
@@ -1147,6 +1323,56 @@ export async function playWithProgress({
     process.stdout.write('\x1b[2J\x1b[H');
     const initialRows = Math.max(1, process.stdout.rows || 24);
     const initialColumns = Math.max(1, process.stdout.columns || 80);
+    const creditsConfig = easterEggForSong(songSnapshot);
+    const creditsTimeline = creditsConfig ? creditsEasterEggTimeline(
+      displayPosition(clock.position(), activeOffsetMs), initialRows) : null;
+    if (creditsConfig?.mode === 'credits-csf') {
+      creditsTransitionHeaderRows = null;
+      creditsPlayerHeaderRows = playbackMetadataRows(songSnapshot, backendLabel, initialColumns)
+        .slice(0, Math.max(0, initialRows - 1));
+      const creditsOrdinaryPlayer = ['player-intro', 'player'].includes(creditsTimeline?.phase);
+      if (creditsOrdinaryPlayer) {
+        const preparedRows = await buildTextPlaybackHeaderRows(songSnapshot, {
+          signal: headerSignal, backendLabel, columns: initialColumns, rows: initialRows
+        });
+        if (controller.signal.aborted || renderId !== headerRenderId || finished) return;
+        creditsPlayerHeaderRows = preparedRows;
+        creditsFullPlayerActive = true;
+        const headerOutput = preparedRows.map((row) => `${row}\x1b[0m\x1b[K`).join('\n');
+        dynamicRow = Math.min(initialRows, preparedRows.length + 1);
+        process.stdout.write(
+          `${headerOutput}${headerOutput ? '\n' : ''}\x1b[${dynamicRow};1H\x1b[s`
+        );
+        dynamicAnchored = true;
+        headerRendering = false;
+        render();
+        return;
+      }
+
+      // 两次逐行过渡使用可切分的 ANSI 封面快照；稳定彩蛋阶段将整屏留给 CSF。
+      creditsFullPlayerActive = creditsTimeline?.phase === 'egg-transition';
+      const prepareCreditsHeader = buildTextPlaybackHeaderRows(songSnapshot, {
+        signal: headerSignal, backendLabel, columns: initialColumns, rows: initialRows
+      });
+      if (creditsTimeline?.phase?.endsWith('-transition')) {
+        const preparedRows = await prepareCreditsHeader;
+        if (controller.signal.aborted || renderId !== headerRenderId || finished) return;
+        creditsPlayerHeaderRows = preparedRows;
+      } else {
+        void prepareCreditsHeader.then((preparedRows) => {
+          if (!controller.signal.aborted && renderId === headerRenderId && !finished
+              && String(activeSong?.id ?? '') === String(songSnapshot.id ?? '')) {
+            creditsPlayerHeaderRows = preparedRows;
+          }
+        });
+      }
+      dynamicRow = 1;
+      process.stdout.write('\x1b[s');
+      dynamicAnchored = true;
+      headerRendering = false;
+      render();
+      return;
+    }
     const coverRows = initialRows >= 10
       ? await tryRenderImage(songSnapshot.cover, {
           signal: headerSignal,
@@ -1240,6 +1466,9 @@ export async function playWithProgress({
       ? clamp(next.index, 0, playlistTracks.length - 1)
       : targetIndex;
     activeSong = next.song;
+    creditsFullPlayerActive = false;
+    creditsPlayerHeaderRows = [];
+    creditsTransitionHeaderRows = null;
     activeUrl = next.url;
     activeDurationMs = Math.max(0, Number(next.durationMs ?? next.song.durationMs) || 0);
     lyrics = Array.isArray(next.lyrics) ? next.lyrics : attachLyricTranslations(
@@ -1276,9 +1505,11 @@ export async function playWithProgress({
     void drawHeader().catch((error) => {
       if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
     });
-    setIndicator(userPaused
-      ? `已暂停 ${resolvedIndex + 1}/${playlistTracks.length}`
-      : `正在播放 ${resolvedIndex + 1}/${playlistTracks.length}`);
+    if (!showCreditsFontRecommendation()) {
+      setIndicator(userPaused
+        ? `已暂停 ${resolvedIndex + 1}/${playlistTracks.length}`
+        : `正在播放 ${resolvedIndex + 1}/${playlistTracks.length}`);
+    }
     return true;
     } finally {
       if (trackTransitionController === transitionController) trackTransitionController = null;
@@ -1328,6 +1559,10 @@ export async function playWithProgress({
     if (closing) return;
     if (action.type === 'refresh') {
       setIndicator('页面已刷新');
+      if (creditsPlayerTransitionActive()) {
+        render();
+        return;
+      }
       void drawHeader().catch((error) => {
         if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
       });
@@ -1530,6 +1765,7 @@ export async function playWithProgress({
   let restoreInput = () => {};
   const resizeRefresh = createLatestDebounce(() => {
     if (finished || closing) return;
+    if (creditsPlayerTransitionActive()) return;
     void drawHeader().catch((error) => {
       if (error?.name !== 'AbortError') void logger?.warn('playback_resize_refresh_failed', { error });
     });
@@ -1594,6 +1830,7 @@ export async function playWithProgress({
     else {
       await spawnAt(clock.position());
       clock.resume();
+      showCreditsFontRecommendation();
       smtcTimer = setInterval(() => {
         if (!finished) {
           updateSmtc(sessionEnded ? 'stopped' : userPaused ? 'paused' : 'playing');
