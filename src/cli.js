@@ -225,7 +225,7 @@ export function songDetailMetadataLines(song, platform = process.platform) {
   ];
 }
 
-async function showSong(song, signal, imageProtocol = 'auto', lyrics = null) {
+async function showSong(song, signal, imageProtocol = 'auto', lyrics = null, logger = null) {
   console.log();
   let transitionCoverRows = [];
   const coverRows = song.cover
@@ -233,6 +233,8 @@ async function showSong(song, signal, imageProtocol = 'auto', lyrics = null) {
         signal,
         size: 'detail',
         protocol: imageProtocol,
+        logger,
+        diagnosticContext: 'song_detail',
         onTextRows: easterEggForSong(song)?.directAnimation
           ? (rows) => { transitionCoverRows = rows; }
           : undefined
@@ -264,6 +266,16 @@ async function showSong(song, signal, imageProtocol = 'auto', lyrics = null) {
       transitionRows.push(remainingText);
     }
   }
+  void logger?.info('song_detail_layout', {
+    songId: song.id,
+    terminalRows: output.rows || 24,
+    terminalColumns: output.columns || 80,
+    coverRows,
+    metadataRows: metadataLines.length,
+    previewCapacity: capacity,
+    previewRows: preview.length,
+    bodyRows: transitionRows.length
+  });
   return transitionRows;
 }
 
@@ -518,7 +530,9 @@ async function handleLogin(rl, api, authState, signal, logger) {
     qrcode.generate(qr.qrurl, { small: true }, (code) => console.log(code));
     qrRendered = true;
   } catch {}
-  if (!qrRendered && qr.qrimg) qrRendered = Boolean(await tryRenderImage(qr.qrimg, { signal }));
+  if (!qrRendered && qr.qrimg) qrRendered = Boolean(await tryRenderImage(qr.qrimg, {
+    signal, logger, diagnosticContext: 'login_qr'
+  }));
   if (!qrRendered) console.log('当前终端无法绘制二维码，请打开上方登录链接。');
   console.log('请使用网易云音乐 App 扫码并确认（等待最多 3 分钟；输入 q 回车返回）…');
 
@@ -737,7 +751,7 @@ async function songMenuInScreen(rl, api, song, context) {
   while (true) {
     const page = await openDetailPage(
       rl,
-      () => showSong(song, signal, context.settings.imageProtocol, cachedLyrics),
+      () => showSong(song, signal, context.settings.imageProtocol, cachedLyrics, context.logger),
       () => detailFooterPrompt(
         chalk.yellow(songDetailPrompt({ loggedIn: authState.loggedIn, favorited })),
         linksVisible ? songLinks : []
@@ -846,10 +860,29 @@ async function openDetailPage(rl, render, prompt, keys, context) {
   };
   try {
     let transitionBodyRows = [];
+    let redrawCount = 0;
     const redraw = async () => {
+      const renderStartedAt = Date.now();
+      const reason = redrawCount++ === 0 ? 'initial' : 'resize';
+      void context.logger?.info('detail_render_started', {
+        reason, terminalRows: output.rows || 24, terminalColumns: output.columns || 80,
+        imageProtocol: context.settings?.imageProtocol
+      });
       if (tty) output.write('\x1b[2J\x1b[H');
-      const renderedRows = await render();
-      if (Array.isArray(renderedRows)) transitionBodyRows = renderedRows;
+      try {
+        const renderedRows = await render();
+        if (Array.isArray(renderedRows)) transitionBodyRows = renderedRows;
+        void context.logger?.info('detail_render_completed', {
+          reason, status: 'success', durationMs: Date.now() - renderStartedAt,
+          bodyRows: Array.isArray(renderedRows) ? renderedRows.length : null,
+          terminalRows: output.rows || 24, terminalColumns: output.columns || 80
+        });
+      } catch (error) {
+        void context.logger?.warn('detail_render_completed', {
+          reason, status: 'failed', durationMs: Date.now() - renderStartedAt, error
+        });
+        throw error;
+      }
     };
     await redraw();
     const promptText = typeof prompt === 'function' ? prompt() : prompt;
@@ -1055,6 +1088,8 @@ async function playlistMenuInScreen(rl, api, id, context) {
       signal: context.signal,
       size: 'detail',
       protocol: context.settings.imageProtocol,
+      logger: context.logger,
+      diagnosticContext: 'playlist_detail',
       onTextRows: (rows) => { transitionCoverRows = rows; }
     }) : 0;
     const transitionRows = [
@@ -1088,6 +1123,18 @@ async function playlistMenuInScreen(rl, api, id, context) {
       console.log(remainingText);
       transitionRows.push(remainingText);
     }
+    void context.logger?.info('playlist_detail_layout', {
+      playlistId: playlist.id || id,
+      terminalRows: output.rows || 24,
+      terminalColumns: output.columns || 80,
+      coverRows,
+      metadataRows: metadata.length + 1,
+      previewLimit: limit,
+      previewRows: Math.min(limit, previewTracks.length),
+      remaining,
+      linksVisible,
+      bodyRows: transitionRows.length + 1
+    });
     console.log();
     transitionRows.push('');
     return transitionRows;
@@ -1501,7 +1548,19 @@ export async function main(args = []) {
     void logger.info('startup', {
       cookiePresent: Boolean(cookie), quality: settings.quality, lyricOffsetMs: settings.lyricOffsetMs,
       smtcOffsetMs: settings.smtcOffsetMs, searchLimit: settings.searchLimit,
-      baseUrl: api.baseUrl, apiFromEnvironment: apiConfiguration.fromEnvironment
+      imageProtocol: settings.imageProtocol,
+      baseUrl: api.baseUrl, apiFromEnvironment: apiConfiguration.fromEnvironment,
+      terminal: {
+        platform: process.platform,
+        tty: Boolean(input.isTTY && output.isTTY),
+        rows: output.rows || null,
+        columns: output.columns || null,
+        term: process.env.TERM || null,
+        termProgram: process.env.TERM_PROGRAM || null,
+        termux: Boolean(process.env.TERMUX_VERSION
+          || /(?:^|\/)com\.termux(?:\/|$)/i.test(process.env.PREFIX || '')),
+        windowsTerminal: Boolean(process.env.WT_SESSION)
+      }
     });
 
     if (/^idlyric$/i.test(args[0] || '') && /^\d+$/.test(args[1] || '')) {
