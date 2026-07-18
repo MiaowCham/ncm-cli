@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CREDITS_CSF_SCORE,
   CREDITS_FONT_HINT_DURATION_MS,
+  CREDITS_LINUX_FONT_RECOMMENDATION,
   creditsEasterEggFrame,
   creditsFontRecommendation,
   easterEggForSong,
@@ -10,16 +11,25 @@ import {
   parseCsfPart
 } from '../src/credits-csf.js';
 
-test('Credits EX 的数字或字符串 ID 都会启用原始 CSF 彩蛋', () => {
+test('两个指定曲目都会启用原始 CSF 彩蛋并使用各自时间轴策略', () => {
   assert.equal(easterEggForSong({ id: 405372425 })?.mode, 'credits-csf');
   assert.equal(easterEggForSong({ id: '405372425' })?.currentLyricOnly, true);
+  assert.equal(easterEggForSong({ id: 405372425 })?.usesPlaybackOffset, true);
+  assert.equal(easterEggForSong({ id: 2053695037 })?.directAnimation, true);
+  assert.equal(easterEggForSong({ id: '2053695037' })?.usesPlaybackOffset, false);
   assert.equal(easterEggForSong({ id: 1 }), null);
 });
 
 test('Credits EX 提供持续十秒的推荐字体提示', () => {
-  assert.match(creditsFontRecommendation({ id: 405372425 }), /NCM Credits VGA16/);
-  assert.equal(creditsFontRecommendation({ id: '405372425' }).includes('assets/fonts'), true);
-  assert.equal(creditsFontRecommendation({ id: 1 }), '');
+  assert.match(creditsFontRecommendation({ id: 405372425 }, 'win32'), /NCM Credits VGA16/);
+  assert.match(creditsFontRecommendation({ id: 2053695037 }, 'win32'), /NCM Credits VGA16/);
+  assert.equal(creditsFontRecommendation({ id: '405372425' }, 'win32').includes('assets/fonts'), true);
+  assert.equal(
+    creditsFontRecommendation({ id: 405372425 }, 'linux'),
+    CREDITS_LINUX_FONT_RECOMMENDATION
+  );
+  assert.match(CREDITS_LINUX_FONT_RECOMMENDATION, /sititou70\/frums-credits-cli-nosound/);
+  assert.equal(creditsFontRecommendation({ id: 1 }, 'linux'), '');
   assert.equal(CREDITS_FONT_HINT_DURATION_MS, 10000);
 });
 

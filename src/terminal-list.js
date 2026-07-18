@@ -146,6 +146,7 @@ export async function selectTerminalList({
   itemText = (item) => String(item),
   signal,
   onInterrupt,
+  onFrame,
   input = process.stdin,
   output = process.stdout
 }) {
@@ -170,6 +171,7 @@ export async function selectTerminalList({
       const line = truncatePlain(`${prefix}${itemText(items[index], index)}`, columns);
       lines.push(index === selectedIndex ? chalk.inverse(line) : line);
     }
+    onFrame?.([...lines, ...Array.from({ length: Math.max(0, rows - lines.length) }, () => '')]);
     output.write(`\x1b[2J\x1b[H${lines.join('\n')}`);
   };
 

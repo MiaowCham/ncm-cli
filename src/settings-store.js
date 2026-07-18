@@ -7,7 +7,7 @@ import { normalizeApiBaseUrl } from './api.js';
 export const DEFAULT_QUALITY = 'standard';
 export const DEFAULT_PLAYER_BACKEND = 'auto';
 export const DEFAULT_IMAGE_PROTOCOL = 'auto';
-export const DEFAULT_LYRIC_OFFSET_MS = 2000;
+export const DEFAULT_LYRIC_OFFSET_MS = 0;
 export const DEFAULT_SMTC_OFFSET_MS = 0;
 export const DEFAULT_SEARCH_LIMIT = 30;
 export const MIN_SEARCH_LIMIT = 1;

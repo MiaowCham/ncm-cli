@@ -4,9 +4,12 @@ import path from 'node:path';
 import { CREDITS_PLAYER_SWITCH_MS, CREDITS_PLAYER_TRANSITION_REFRESH_MS, creditsPlayerTransitionTiming } from './credits-player-transition.js';
 
 const CREDITS_EX_ID = '405372425';
+const CREDITS_DIRECT_ID = '2053695037';
+const CREDITS_EASTER_EGG_IDS = new Set([CREDITS_EX_ID, CREDITS_DIRECT_ID]);
 const ASSET_ROOT = fileURLToPath(new URL('../assets/credits-csf/', import.meta.url));
 
 export const CREDITS_FONT_RECOMMENDATION = '推荐使用字体：NCM Credits VGA16（见 assets/fonts）';
+export const CREDITS_LINUX_FONT_RECOMMENDATION = '请按照 sititou70/frums-credits-cli-nosound 的说明调整 Linux 控制台字体';
 export const CREDITS_FONT_HINT_DURATION_MS = 10000;
 
 function walkFiles(root, relative = '') {
@@ -94,17 +97,30 @@ export function loadCsfScore(root = ASSET_ROOT) {
 export const CREDITS_CSF_SCORE = loadCsfScore();
 
 export const CREDITS_CSF_START_DELAY_MS = 46800;
+export const CREDITS_DIRECT_FRAME_OFFSET_MS = 1400;
 const CREDITS_EASTER_EGG = Object.freeze({
   mode: 'credits-csf',
-  currentLyricOnly: true
+  currentLyricOnly: true,
+  directAnimation: false,
+  usesPlaybackOffset: true
+});
+const CREDITS_DIRECT_EASTER_EGG = Object.freeze({
+  mode: 'credits-csf',
+  currentLyricOnly: true,
+  directAnimation: true,
+  usesPlaybackOffset: false
 });
 
 export function easterEggForSong(song) {
-  return String(song?.id ?? '') === CREDITS_EX_ID ? CREDITS_EASTER_EGG : null;
+  const id = String(song?.id ?? '');
+  if (id === CREDITS_EX_ID) return CREDITS_EASTER_EGG;
+  if (id === CREDITS_DIRECT_ID) return CREDITS_DIRECT_EASTER_EGG;
+  return null;
 }
 
-export function creditsFontRecommendation(song) {
-  return String(song?.id ?? '') === CREDITS_EX_ID ? CREDITS_FONT_RECOMMENDATION : '';
+export function creditsFontRecommendation(song, platform = process.platform) {
+  if (!CREDITS_EASTER_EGG_IDS.has(String(song?.id ?? ''))) return '';
+  return platform === 'linux' ? CREDITS_LINUX_FONT_RECOMMENDATION : CREDITS_FONT_RECOMMENDATION;
 }
 
 export function creditsCsfDurationMs(score = CREDITS_CSF_SCORE) {
@@ -157,6 +173,20 @@ export function creditsEasterEggTimeline(elapsedMs, transitionRowCount = 0) {
 
 export function creditsEasterEggShowsFrame(timeline) {
   return timeline?.phase === 'animation';
+}
+
+export function creditsEasterEggTimelineForSong(song, rawElapsedMs, adjustedElapsedMs, transitionRowCount = 0) {
+  const config = easterEggForSong(song);
+  if (!config) return null;
+  if (!config.directAnimation) return creditsEasterEggTimeline(adjustedElapsedMs, transitionRowCount);
+  const elapsed = Number(rawElapsedMs);
+  const safeElapsed = Number.isFinite(elapsed) ? elapsed : 0;
+  return {
+    phase: 'animation',
+    frameElapsedMs: safeElapsed + CREDITS_DIRECT_FRAME_OFFSET_MS,
+    refreshIntervalMs: CREDITS_PLAYER_TRANSITION_REFRESH_MS,
+    nextChangeDelayMs: Infinity
+  };
 }
 
 

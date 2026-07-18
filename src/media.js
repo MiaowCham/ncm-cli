@@ -18,11 +18,16 @@ import {
   CREDITS_FONT_HINT_DURATION_MS,
   creditsEasterEggFrame,
   creditsEasterEggShowsFrame,
-  creditsEasterEggTimeline,
+  creditsEasterEggTimelineForSong,
   creditsFontRecommendation,
   easterEggForSong
 } from './credits-csf.js';
-import { composeCreditsPlayerTransitionRows } from './credits-player-transition.js';
+import {
+  CREDITS_PLAYER_TRANSITION_REFRESH_MS,
+  composeCreditsPlayerTransitionRows,
+  playCreditsPageRevealTransition,
+  playCreditsPlayerTransition
+} from './credits-player-transition.js';
 
 let cachedWindowsTerminalVersion;
 let retainedSmtcBridge = null;
@@ -185,6 +190,7 @@ export function playerArguments(command, url, seconds, volume = 100) {
 export function playbackAction(buffer, { playlistOpen = false, playlistSelection = 0 } = {}) {
   const key = Buffer.isBuffer(buffer) ? buffer.toString('utf8') : String(buffer);
   if (key.includes('\u0003')) return { type: 'interrupt' };
+  if (playlistOpen && (key.toLowerCase() === 'q' || key === '\u001b')) return { type: 'close_playlist' };
   if (key.toLowerCase() === 'q') return { type: 'quit' };
   if (key.toLowerCase() === 'r') return { type: 'refresh' };
   if (key.includes('\u001b[1;5D') || key.includes('\u001b[5D')) return { type: 'playlist_previous' };
@@ -205,7 +211,6 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
   if (key.toLowerCase() === 's') return { type: 'cycle_random_mode' };
   if (key.toLowerCase() === 'l') return { type: 'cycle_loop_mode' };
   if (key.toLowerCase() === 'f') return { type: 'favorite' };
-  if (playlistOpen && key === '\u001b') return { type: 'close_playlist' };
   if (playlistOpen && (key === '\r' || key === '\n')) return { type: 'playlist_select', index: playlistSelection };
   if (key === ' ') return { type: 'toggle_pause' };
   if (key.includes('\u001b[D')) return { type: 'seek', deltaMs: -5000 };
@@ -222,6 +227,10 @@ export function playbackTerminalModeSequence(entering) {
   return entering
     ? '\u001b[?1007l\u001b[?1000h\u001b[?1006h'
     : '\u001b[?1000l\u001b[?1006l\u001b[?1007h';
+}
+
+export function playbackEntrySequence(directAnimation = false) {
+  return `${playbackTerminalModeSequence(true)}\x1b[?25l${directAnimation ? '' : '\x1b[2J\x1b[H'}`;
 }
 
 function formatTime(ms) {
@@ -294,9 +303,9 @@ export function adjustPlaybackOffset(offsetMs, deltaMs) {
   );
 }
 
-export function lyricPosition(elapsedMs, lyricOffsetMs = 2000) {
+export function lyricPosition(elapsedMs, lyricOffsetMs = 0) {
   const offset = Number(lyricOffsetMs);
-  return displayPosition(elapsedMs, Number.isFinite(offset) ? offset : 2000);
+  return displayPosition(elapsedMs, Number.isFinite(offset) ? offset : 0);
 }
 
 export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOffsetMs = 0, animationIntervalMs = Infinity) {
@@ -527,17 +536,68 @@ export function playbackPlaylistModeRows(options = {}, width = 80) {
   return rows;
 }
 
-export function playbackProgressText({ bar, timeText, paused = false, pauseText = '[已暂停]', columns = 80 } = {}) {
+export function playbackProgressText({
+  bar = '', timeText = '', paused = false, columns = 80, colorizePaused = chalk.yellow
+} = {}) {
   const width = Math.max(1, columns);
-  const state = paused ? pauseText : '';
-  const full = `${bar}${state ? ` ${state}` : ''} ${timeText}`;
-  if (stringWidth(full) <= width) return full;
-  if (paused) {
-    const compact = `> ${state}`;
-    if (stringWidth(compact) <= width) return compact;
-    if (stringWidth(state) <= width) return state;
+  const rawTime = String(timeText);
+  const styleTime = (value) => paused ? colorizePaused(value) : value;
+  const full = `${bar} ${rawTime}`;
+  if (stringWidth(full) <= width) return `${bar} ${styleTime(rawTime)}`;
+  const barWidth = stringWidth(bar);
+  if (barWidth >= width) return bar;
+  const timeWidth = Math.max(0, width - barWidth - 1);
+  return timeWidth > 0 ? `${bar} ${styleTime(truncateText(rawTime, timeWidth))}` : bar;
+}
+
+export async function runPlaybackExitSequence({ stop, transition, onError = () => {} } = {}) {
+  for (const [stage, operation] of [['stop', stop], ['transition', transition]]) {
+    if (typeof operation !== 'function') continue;
+    try {
+      await operation();
+    } catch (error) {
+      await onError(error, stage);
+    }
   }
-  return truncateText(full, width);
+}
+
+export async function startTrackWithPreparedHeader({
+  directAnimation = false,
+  drawHeader,
+  startPlayback,
+  signal,
+  onHeaderError = () => {}
+} = {}) {
+  if (directAnimation) {
+    try {
+      if (signal) {
+        if (signal.aborted) return false;
+        let removeAbortListener = () => {};
+        const aborted = new Promise((_, reject) => {
+          const onAbort = () => reject(signal.reason ?? new DOMException('操作已取消', 'AbortError'));
+          signal.addEventListener('abort', onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+        });
+        try {
+          await Promise.race([Promise.resolve(drawHeader?.(signal)), aborted]);
+        } finally {
+          removeAbortListener();
+        }
+      } else {
+        await drawHeader?.();
+      }
+    } catch (error) {
+      if (signal?.aborted) return false;
+      await onHeaderError(error);
+    }
+    if (signal?.aborted) return false;
+    await startPlayback?.();
+    return true;
+  }
+  if (signal?.aborted) return false;
+  await startPlayback?.();
+  void Promise.resolve().then(() => drawHeader?.()).catch(onHeaderError);
+  return true;
 }
 
 const PROGRESS_BLOCKS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
@@ -553,6 +613,38 @@ export function playbackProgressSegments(ratio, width) {
     partial,
     unplayed: ' '.repeat(unplayedCells)
   };
+}
+
+export function playbackPlaylistOverlayRows({
+  playlist,
+  selectedIndex = 0,
+  currentIndex = 0,
+  availableRows = 0,
+  columns = 80
+} = {}) {
+  const capacity = Math.max(0, Math.floor(Number(availableRows) || 0));
+  const width = Math.max(1, Math.floor(Number(columns) || 1));
+  if (!capacity) return [];
+  const title = chalk.cyanBright.bold(truncateText(`歌单：${playlist?.name || '当前播放队列'}`, width));
+  // 极矮窗口优先保留可操作的选中歌曲；空间足够时再加入标题及其上方空行。
+  const headerRows = capacity >= 3 ? ['', title] : capacity >= 2 ? [title] : [];
+  const viewport = playlistViewport(
+    playlist?.tracks,
+    selectedIndex,
+    currentIndex,
+    Math.max(0, capacity - headerRows.length)
+  );
+  const trackRows = viewport.rows.map((item) => {
+    const prefix = item.selected ? '› ' : '  ';
+    const text = truncateText(`${prefix}${playlistTrackText(item.track, item.index)}`, width);
+    if (item.selected) return chalk.bgWhite.black(text);
+    return item.current ? chalk.whiteBright.bold(text) : secondaryText(text);
+  });
+  return [
+    ...headerRows,
+    ...trackRows,
+    ...Array(Math.max(0, capacity - headerRows.length - trackRows.length)).fill('')
+  ];
 }
 
 export function shouldSyncPlayerPosition(localMs, playerSeconds, thresholdMs = 750) {
@@ -634,11 +726,148 @@ function playlistTrackText(track, index) {
   return `${index + 1}. ${title}${artists ? ` - ${artists}` : ''}`;
 }
 
-export function playbackDynamicRows({ progress, modeRows, shortcutRows, indicatorRow, contentRows, contentBeforeControls = false, availableRows = Infinity }) {
-  const ordered = contentBeforeControls
-    ? [...contentRows, progress, ...modeRows, ...shortcutRows, indicatorRow]
-    : [progress, ...modeRows, ...shortcutRows, indicatorRow, ...contentRows];
-  return ordered.slice(0, Math.max(0, availableRows));
+export function playbackDynamicRows({ progress, modeRows, shortcutRows, indicatorRow, contentRows, availableRows = Infinity }) {
+  const controls = [indicatorRow, progress, ...modeRows, ...shortcutRows];
+  if (!Number.isFinite(availableRows)) return [...contentRows, ...controls];
+  const capacity = Math.max(0, Math.floor(Number(availableRows) || 0));
+  const visibleControls = controls.slice(0, capacity);
+  const contentCapacity = Math.max(0, capacity - visibleControls.length);
+  const visibleContent = contentRows.slice(0, contentCapacity);
+  const padding = Array(Math.max(0, contentCapacity - visibleContent.length)).fill('');
+  return [...visibleContent, ...padding, ...visibleControls];
+}
+
+export function planPlaybackVerticalLayout({
+  rows,
+  coverRows = 0,
+  metadataRows = 0,
+  futureLyricRows = 0,
+  modeRows = 0,
+  shortcutRows = 0,
+  statusRows = 0,
+  currentLyricRows = 1,
+  progressRows = 1
+} = {}) {
+  const capacity = Math.max(0, Math.floor(Number(rows) || 0));
+  const visible = {
+    coverRows: Math.max(0, Math.floor(Number(coverRows) || 0)),
+    metadataRows: Math.max(0, Math.floor(Number(metadataRows) || 0)),
+    futureLyricRows: Math.max(0, Math.floor(Number(futureLyricRows) || 0)),
+    modeRows: Math.max(0, Math.floor(Number(modeRows) || 0)),
+    shortcutRows: Math.max(0, Math.floor(Number(shortcutRows) || 0)),
+    statusRows: Math.max(0, Math.floor(Number(statusRows) || 0)),
+    currentLyricRows: Math.max(0, Math.floor(Number(currentLyricRows) || 0)),
+    progressRows: Math.max(0, Math.floor(Number(progressRows) || 0)),
+    compactRequired: false
+  };
+  const used = () => visible.coverRows + visible.metadataRows + visible.futureLyricRows
+    + visible.modeRows + visible.shortcutRows + visible.statusRows
+    + visible.currentLyricRows + visible.progressRows;
+  let overflow = Math.max(0, used() - capacity);
+  const removeRows = (key, maximum = visible[key]) => {
+    const removed = Math.min(overflow, visible[key], maximum);
+    visible[key] -= removed;
+    overflow -= removed;
+  };
+  removeRows('futureLyricRows');
+  removeRows('metadataRows', Math.max(0, visible.metadataRows - 1));
+  if (overflow > 0 && visible.coverRows > 0) {
+    overflow = Math.max(0, overflow - visible.coverRows);
+    visible.coverRows = 0;
+  }
+  removeRows('metadataRows');
+  if (overflow > 0 && visible.modeRows > 0) {
+    overflow = Math.max(0, overflow - visible.modeRows);
+    visible.modeRows = 0;
+  }
+  if (overflow > 0 && visible.shortcutRows > 0) {
+    overflow = Math.max(0, overflow - visible.shortcutRows);
+    visible.shortcutRows = 0;
+  }
+  removeRows('statusRows');
+  if (overflow > 0 && visible.currentLyricRows > 0 && visible.progressRows > 0 && capacity === 1) {
+    visible.compactRequired = true;
+    overflow -= 1;
+  }
+  if (overflow > 0) removeRows('currentLyricRows');
+  if (overflow > 0) removeRows('progressRows');
+  return Object.freeze({ ...visible, capacity, unusedRows: Math.max(0, capacity - (used() - (visible.compactRequired ? 1 : 0))) });
+}
+
+export function playbackCoverRowBudget(rows) {
+  const height = Math.max(0, Math.floor(Number(rows) || 0));
+  return height > 1 ? Math.max(2, Math.min(20, Math.floor(height * 0.36))) : 0;
+}
+
+export function compactPlaybackRequiredRow(currentLyric, progress, columns) {
+  const width = Math.max(1, Math.floor(Number(columns) || 1));
+  if (width === 1) return truncateText(currentLyric || progress, 1);
+  const lyricWidth = Math.max(1, Math.floor((width - 1) / 2));
+  const lyric = truncateText(currentLyric, lyricWidth);
+  const remaining = Math.max(1, width - stringWidth(lyric) - (width > 2 ? 1 : 0));
+  const separator = width > 2 ? ' ' : '';
+  return `${lyric}${separator}${truncateText(progress, remaining)}`;
+}
+
+export function playbackPrioritizedRows({
+  progress,
+  modeRows = [],
+  shortcutRows = [],
+  indicatorRow = '',
+  requiredContentRows = [],
+  optionalPrefixRows = [],
+  optionalSuffixRows = [],
+  availableRows = Infinity,
+  columns = 80,
+  layout: plannedLayout = null
+} = {}) {
+  if (!Number.isFinite(availableRows)) {
+    return [
+      ...optionalPrefixRows, ...requiredContentRows, ...optionalSuffixRows,
+      indicatorRow, progress, ...modeRows, ...shortcutRows
+    ];
+  }
+  const capacity = Math.max(0, Math.floor(Number(availableRows) || 0));
+  const layout = plannedLayout ?? planPlaybackVerticalLayout({
+    rows: capacity,
+    futureLyricRows: optionalPrefixRows.length + optionalSuffixRows.length,
+    modeRows: modeRows.length,
+    shortcutRows: shortcutRows.length,
+    statusRows: 1,
+    currentLyricRows: requiredContentRows.length ? 1 : 0,
+    progressRows: 1
+  });
+  if (layout.compactRequired) {
+    return [compactPlaybackRequiredRow(requiredContentRows[0] || '', progress, columns)];
+  }
+  const prefixCount = Math.min(optionalPrefixRows.length, layout.futureLyricRows);
+  const suffixCount = Math.max(0, layout.futureLyricRows - prefixCount);
+  const content = [
+    ...optionalPrefixRows.slice(0, prefixCount),
+    ...requiredContentRows.slice(0, layout.currentLyricRows),
+    ...optionalSuffixRows.slice(0, suffixCount)
+  ];
+  const visibleControls = [
+    ...(layout.statusRows ? [indicatorRow] : []),
+    ...(layout.progressRows ? [progress] : []),
+    ...modeRows.slice(0, layout.modeRows),
+    ...shortcutRows.slice(0, layout.shortcutRows)
+  ];
+  // 以动态区域的实际剩余高度补齐，而不是只依赖整屏布局快照。
+  // 封面文本的实际行数可能与预估相差一行；只显示当前歌词时没有未来歌词
+  // 吸收这段差额，若不在这里补齐，底部控制区会整体上浮。
+  const padding = Array(Math.max(0, capacity - content.length - visibleControls.length)).fill('');
+  return [
+    ...content,
+    ...padding,
+    ...visibleControls
+  ];
+}
+
+export function playbackRowsWithTopSpacer(rows, capacity) {
+  const limit = Math.max(0, Math.floor(Number(capacity) || 0));
+  if (limit <= 1) return rows.slice(0, limit);
+  return ['', ...rows].slice(0, limit);
 }
 
 function renderDynamic({
@@ -659,6 +888,7 @@ function renderDynamic({
   easterEgg = null,
   canFavorite = false,
   favorited = false,
+  verticalLayout = null,
   captureOnly = false
 }) {
   const columns = Math.max(1, process.stdout.columns || 80);
@@ -666,8 +896,7 @@ function renderDynamic({
   const startRow = clamp(dynamicRow, 1, rows);
   const availableRows = rows - startRow + 1;
   const timeText = `${formatTime(elapsedMs)} / ${formatTime(durationMs)}`;
-  const pauseWidth = paused ? stringWidth(' [已暂停]') : 0;
-  const barWidth = clamp(columns - stringWidth(timeText) - pauseWidth - 3, 1, 50);
+  const barWidth = clamp(columns - stringWidth(timeText) - 3, 1, 50);
   const ratio = durationMs ? clamp(elapsedMs / durationMs, 0, 1) : 0;
   const segments = playbackProgressSegments(ratio, barWidth);
   const partial = segments.partial
@@ -678,7 +907,6 @@ function renderDynamic({
     bar,
     timeText,
     paused,
-    pauseText: chalk.yellow('[已暂停]'),
     columns
   });
   const modeRows = playbackModeText
@@ -689,50 +917,59 @@ function renderDynamic({
       }, columns).map((row) => chalk.magentaBright(row))
     : [];
   const shortcutRows = playbackShortcutRows({ canFavorite, favorited }, columns).map((row) => chalk.cyanBright(row));
-  // 快捷键始终保留；控制结果占用快捷键和歌词之间原本的空行。
-  const fixedChromeRows = 1 + modeRows.length + 1;
-  const visibleShortcutRows = shortcutRows.slice(0, Math.max(0, availableRows - fixedChromeRows));
-  const chromeRows = Math.min(availableRows, fixedChromeRows + visibleShortcutRows.length);
-  const lyricCapacity = Math.max(0, availableRows - chromeRows);
-  let contentRows;
   if (playlistOpen) {
-    const title = truncateText(`歌单：${playlist?.name || '当前播放队列'}`, columns);
-    const viewport = playlistViewport(playlist?.tracks, playlistSelection, playlist?.currentIndex, Math.max(0, lyricCapacity - 1));
-    const trackRows = viewport.rows.map((item) => {
-      const prefix = `${item.current ? '▶' : ' '} ${item.selected ? '›' : ' '} `;
-      const text = truncateText(`${prefix}${playlistTrackText(item.track, item.index)}`, columns);
-      if (item.selected) return chalk.bgWhite.black(text);
-      return item.current ? chalk.whiteBright.bold(text) : secondaryText(text);
+    const outputRows = playbackPlaylistOverlayRows({
+      playlist,
+      selectedIndex: playlistSelection,
+      currentIndex: playlist?.currentIndex,
+      availableRows,
+      columns
     });
-    contentRows = lyricCapacity > 0
-      ? [chalk.cyanBright.bold(title), ...(trackRows.length ? trackRows : [secondaryText('歌单为空')])].slice(0, lyricCapacity)
-      : [];
-  } else if (easterEgg?.mode === 'credits-csf' && creditsEasterEggShowsFrame(easterEgg)) {
+    const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
+    if (captureOnly) return outputRows;
+    process.stdout.write(`${position}\x1b[0J${outputRows.join('\n')}`);
+    return;
+  }
+  let requiredContentRows = [];
+  let optionalPrefixRows = [];
+  let optionalSuffixRows = [];
+  if (easterEgg?.mode === 'credits-csf' && creditsEasterEggShowsFrame(easterEgg)) {
     // 原始 CSF 使用终端默认色，不对上游分镜追加自定义样式。
-    contentRows = creditsEasterEggFrame(easterEgg.frameElapsedMs, columns, lyricCapacity);
+    const frameRows = creditsEasterEggFrame(easterEgg.frameElapsedMs, columns, rows);
+    requiredContentRows = frameRows.slice(0, 1);
+    optionalSuffixRows = frameRows.slice(1);
   } else {
     const displayRows = playbackLyricRows(
-      lyrics, lyricElapsedMs, lyricCapacity, showTranslation, columns, currentLyricOnly
+      lyrics, lyricElapsedMs, rows, showTranslation, columns, currentLyricOnly
     );
-    contentRows = displayRows.length
-      ? displayRows.map((line, rowIndex) => {
+    const lyricRows = displayRows.length
+      ? displayRows.map((line) => {
           const text = truncateText(line.text, columns);
           const tone = lyricTone(line);
-          if (tone === 'future') return secondaryText(text);
-          if (line.translation) return tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text);
-          return tone === 'current' ? primaryText(text) : chalk.white(text);
+          const rendered = tone === 'future'
+            ? secondaryText(text)
+            : line.translation
+              ? tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text)
+              : tone === 'current' ? primaryText(text) : chalk.white(text);
+          return { line, tone, rendered };
         })
-      : lyricCapacity > 0 ? [currentLyricOnly ? '' : secondaryText(truncateText('暂无逐行歌词', columns))] : [];
+      : [{ line: null, tone: 'current', rendered: currentLyricOnly ? '' : secondaryText(truncateText('暂无逐行歌词', columns)) }];
+    const current = lyricRows.find((item) => item.tone === 'current' && !item.line?.translation) ?? lyricRows[0];
+    requiredContentRows = [current.rendered];
+    optionalPrefixRows = [''];
+    optionalSuffixRows = lyricRows.filter((item) => item !== current).map((item) => item.rendered);
   }
-  const creditsFrameVisible = easterEgg?.mode === 'credits-csf' && creditsEasterEggShowsFrame(easterEgg);
-  const outputRows = playbackDynamicRows({
+  const outputRows = playbackPrioritizedRows({
     progress,
     modeRows,
-    shortcutRows: visibleShortcutRows,
+    shortcutRows,
     indicatorRow: indicator ? chalk.yellow(truncateText(indicator, columns)) : '',
-    contentRows,
-    contentBeforeControls: creditsFrameVisible && !playlistOpen,
-    availableRows
+    requiredContentRows,
+    optionalPrefixRows,
+    optionalSuffixRows,
+    availableRows,
+    columns,
+    layout: verticalLayout
   });
   const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
   if (captureOnly) return outputRows;
@@ -803,20 +1040,19 @@ function playbackMetadataRows(song, backendLabel, columns) {
   ];
 }
 
-async function buildTextPlaybackHeaderRows(song, { signal, backendLabel, columns, rows }) {
+async function buildTextPlaybackHeaderRows(song, { signal, backendLabel, columns, layout }) {
   const coverRows = [];
-  if (song.cover && rows >= 10) {
+  let coverBuffer = null;
+  if (song.cover && layout.coverRows > 0) {
     try {
-      const buffer = await loadImage(song.cover, signal);
+      coverBuffer = await loadImage(song.cover, signal);
       const width = Math.max(1, Math.min(52, columns - 2));
-      const height = Math.max(1, Math.min(20, Math.floor(rows * 0.36), rows - 8));
-      const text = await renderAnsiBlocks(buffer, width, height);
+      const text = await renderAnsiBlocks(coverBuffer, width, layout.coverRows);
       coverRows.push(...text.split(/\r?\n/));
-    } catch {}
+    } catch { coverBuffer = null; }
   }
   const metadata = playbackMetadataRows(song, backendLabel, columns);
-  const metadataCapacity = Math.max(0, rows - coverRows.length - 1);
-  return [...coverRows, ...metadata.slice(0, metadataCapacity)];
+  return { coverRows, metadata, coverBuffer };
 }
 
 function writeCreditsTransitionRows(entries) {
@@ -828,6 +1064,22 @@ function writeCreditsTransitionRows(entries) {
   }).join('\n');
   process.stdout.write(`\x1b[H${output}`);
 
+}
+
+function refreshCreditsTargetPage(rows, rowCount) {
+  const height = Math.max(1, Math.ceil(Number(rowCount) || 1));
+  const stableRows = Array.from({ length: height }, (_, index) => rows[index] ?? '');
+  const output = stableRows.map((row) => `${row}\x1b[0m\x1b[K`).join('\n');
+  process.stdout.write(`\x1b[2J\x1b[H${output}\x1b[H`);
+}
+
+function writeCreditsPageRevealRows(entries) {
+  for (const { index, state, text } of entries) {
+    const rendered = state === 'flash-target'
+      ? chalk.inverse(chalk.whiteBright(text))
+      : state === 'target-preview' ? chalk.whiteBright(text) : text;
+    process.stdout.write(`\x1b[${index + 1};1H${rendered}\x1b[0m\x1b[K`);
+  }
 }
 function writeTerminalOutput(output) {
   return new Promise((resolve, reject) => {
@@ -850,17 +1102,29 @@ async function tryNativeGraphics(buffer, width, height, protocol) {
   return true;
 }
 
-export async function tryRenderImage(source, { signal, size = 'detail', shouldRender, protocol = 'auto' } = {}) {
-  if (!source || !process.stdout.isTTY || protocol === 'none') return 0;
+export async function tryRenderImage(source, {
+  signal, size = 'detail', shouldRender, protocol = 'auto', maxRows, onTextRows,
+  allowNativeGraphics = false, preloadedBuffer = null
+} = {}) {
+  if ((!source && !preloadedBuffer) || !process.stdout.isTTY || protocol === 'none') return 0;
   const guarded = typeof shouldRender === 'function';
   const current = () => !signal?.aborted && (!guarded || shouldRender());
   try {
-    const buffer = await loadImage(source, signal);
+    const buffer = preloadedBuffer ?? await loadImage(source, signal);
     if (!current()) return 0;
     const columns = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
     const width = Math.max(1, Math.min(size === 'playback' ? 52 : 56, columns - 2));
-    const height = Math.max(1, Math.min(size === 'playback' ? 20 : 22, Math.floor(rows * 0.36), rows - 8));
+    const plannedRows = Number.isFinite(Number(maxRows))
+      ? Math.max(1, Math.floor(Number(maxRows)))
+      : Math.max(1, rows - 8);
+    const height = Math.max(1, Math.min(size === 'playback' ? 20 : 22, Math.floor(rows * 0.36), plannedRows));
+    if (typeof onTextRows === 'function') {
+      try {
+        const text = await renderAnsiBlocks(buffer, width, height);
+        if (current()) onTextRows(text.split(/\r?\n/));
+      } catch {}
+    }
     const hasChafa = commandExists('chafa');
     const protocols = imageProtocolOrder({
       preference: protocol,
@@ -875,7 +1139,7 @@ export async function tryRenderImage(source, { signal, size = 'detail', shouldRe
       if (protocol === 'kitty' || protocol === 'iterm2') {
         // terminal-image 的 Kitty 路径可能在 Promise 返回前直接写 stdout，
         // 无法为连续切歌做 generation 校验；可取消的后台封面任务跳过该路径。
-        if (guarded) continue;
+        if (guarded && !allowNativeGraphics) continue;
         try {
           if (await tryNativeGraphics(buffer, width, height, protocol)) return height;
         } catch {}
@@ -936,7 +1200,7 @@ export async function playWithProgress({
   durationMs,
   lyricSource = '',
   translatedLyricSource = '',
-  lyricOffsetMs = 2000,
+  lyricOffsetMs = 0,
   smtcOffsetMs = 0,
   playerBackend = 'auto',
   imageProtocol = 'auto',
@@ -947,7 +1211,8 @@ export async function playWithProgress({
   onInterrupt,
   onOffsetChange,
   onTrackChange,
-  onFavorite
+  onFavorite,
+  returnPageRows = []
 }) {
   let releaseScreen = () => {};
   await closeRetainedSmtc();
@@ -993,6 +1258,7 @@ export async function playWithProgress({
   let closing = false;
   let trackTransitioning = false;
   let trackTransitionController = null;
+  let initialEntryTransitionController = null;
   const transitionCancelled = Symbol('transition_cancelled');
   let refreshTimer = null;
   let smtcTimer = null;
@@ -1006,6 +1272,9 @@ export async function playWithProgress({
   let creditsPlayerHeaderRows = [];
   let creditsTransitionHeaderRows = null;
   let creditsFullPlayerActive = false;
+  let pageTransitionDepth = 0;
+  let activeVerticalLayout = null;
+  let creditsPlayerVerticalLayout = null;
   let dispatchPlaybackAction = () => {};
   let sessionControlsEnabled = true;
   let sessionEnded = false;
@@ -1135,12 +1404,16 @@ export async function playWithProgress({
 
   const creditsPlayerTransitionActive = () => Boolean(
     easterEggForSong(activeSong)
-    && creditsEasterEggTimeline(displayPosition(clock.position(), activeOffsetMs),
-      Math.max(1, process.stdout.rows || 24)).phase.endsWith('-transition')
+    && creditsEasterEggTimelineForSong(
+      activeSong,
+      clock.position(),
+      displayPosition(clock.position(), activeOffsetMs),
+      Math.max(1, process.stdout.rows || 24)
+    ).phase.endsWith('-transition')
   );
 
   const render = () => {
-    if (!tty || finished || headerRendering) return;
+    if (!tty || finished || headerRendering || pageTransitionDepth > 0) return;
     if (refreshTimer) clearTimeout(refreshTimer);
     const rawElapsedMs = clock.position();
     const elapsedMs = sessionEnded ? activeDurationMs : displayPosition(rawElapsedMs, activeOffsetMs);
@@ -1150,7 +1423,10 @@ export async function playWithProgress({
     if (indicator && now >= indicatorUntil) indicator = '';
     const easterEggConfig = easterEggForSong(activeSong);
     const easterEggTimeline = easterEggConfig
-      ? creditsEasterEggTimeline(lyricElapsedMs, Math.max(1, process.stdout.rows || 24)) : null;
+      ? creditsEasterEggTimelineForSong(
+          activeSong, rawElapsedMs, lyricElapsedMs, Math.max(1, process.stdout.rows || 24)
+        )
+      : null;
     const easterEgg = easterEggConfig ? {
       ...easterEggConfig,
       ...easterEggTimeline
@@ -1170,7 +1446,8 @@ export async function playWithProgress({
         ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen }
         : '',
       canFavorite: typeof onFavorite === 'function',
-      favorited: favoritedSongIds.has(String(activeSong?.id ?? ''))
+      favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
+      verticalLayout: activeVerticalLayout
     };
     const creditsTransitionActive = easterEgg?.phase?.endsWith('-transition');
     if (creditsTransitionActive && !creditsTransitionHeaderRows) {
@@ -1185,6 +1462,7 @@ export async function playWithProgress({
         dynamicAnchored: false,
         currentLyricOnly: true,
         easterEgg: { ...easterEgg, phase: 'animation' },
+        verticalLayout: null,
         captureOnly: true
       });
       const playerDynamicRows = renderDynamic({
@@ -1193,6 +1471,7 @@ export async function playWithProgress({
         dynamicAnchored: false,
         currentLyricOnly: Boolean(easterEggConfig?.currentLyricOnly),
         easterEgg: null,
+        verticalLayout: creditsPlayerVerticalLayout,
         captureOnly: true
       });
       const playerRows = [...stableCreditsHeaderRows, ...playerDynamicRows];
@@ -1232,7 +1511,8 @@ export async function playWithProgress({
         dynamicRow,
         dynamicAnchored,
         currentLyricOnly: Boolean(easterEggConfig?.currentLyricOnly),
-        easterEgg: creditsOrdinaryPlayer ? null : easterEgg
+        easterEgg: creditsOrdinaryPlayer ? null : easterEgg,
+        verticalLayout: creditsOrdinaryPlayer ? creditsPlayerVerticalLayout : null
       });
     }
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
@@ -1247,6 +1527,84 @@ export async function playWithProgress({
   const setIndicator = (text, durationMs = 1200) => {
     indicator = text;
     indicatorUntil = performance.now() + Math.max(0, Number(durationMs) || 0);
+  };
+
+  const runPageTransition = async (operation) => {
+    pageTransitionDepth += 1;
+    try {
+      return await operation();
+    } finally {
+      pageTransitionDepth = Math.max(0, pageTransitionDepth - 1);
+    }
+  };
+
+  const captureDirectCreditsAnimationRows = (rawElapsedMs = clock.position()) => {
+    const config = easterEggForSong(activeSong);
+    if (!config?.directAnimation) return [];
+    const elapsedMs = displayPosition(rawElapsedMs, activeOffsetMs);
+    const timeline = creditsEasterEggTimelineForSong(
+      activeSong, rawElapsedMs, elapsedMs, Math.max(1, process.stdout.rows || 24)
+    );
+    return renderDynamic({
+      elapsedMs,
+      lyricElapsedMs: elapsedMs,
+      durationMs: activeDurationMs,
+      paused: true,
+      lyrics,
+      showTranslation,
+      indicator,
+      playlist: playbackPlaylist,
+      playlistOpen: false,
+      playlistSelection,
+      playbackModeText: playlistTracks.length
+        ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen: false }
+        : '',
+      canFavorite: typeof onFavorite === 'function',
+      favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
+      dynamicRow: 1,
+      dynamicAnchored: false,
+      currentLyricOnly: true,
+      easterEgg: { ...config, ...timeline },
+      verticalLayout: null,
+      captureOnly: true
+    });
+  };
+
+  const playDirectCreditsEntryTransition = async (transitionSignal) => {
+    const config = easterEggForSong(activeSong);
+    if (!tty || !config?.directAnimation) return;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    const terminalRows = Math.max(1, process.stdout.rows || 24);
+    const animationRows = captureDirectCreditsAnimationRows(0);
+    await runPageTransition(() =>
+      playCreditsPageRevealTransition(animationRows, terminalRows, {
+        signal: transitionSignal,
+        writeFrame: (entries) => writeCreditsPageRevealRows(entries),
+        refreshIntervalMs: CREDITS_PLAYER_TRANSITION_REFRESH_MS
+      })
+    );
+    creditsFullPlayerActive = false;
+    dynamicRow = 1;
+    dynamicAnchored = true;
+    headerRendering = false;
+    process.stdout.write('\x1b[H\x1b[s');
+  };
+
+  const playDirectCreditsExitTransition = async () => {
+    const config = easterEggForSong(activeSong);
+    if (!tty || !config?.directAnimation) return;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    const terminalRows = Math.max(1, process.stdout.rows || 24);
+    const animationRows = captureDirectCreditsAnimationRows();
+    const targetRows = Array.isArray(returnPageRows) ? returnPageRows : [];
+    if (!targetRows.length) return;
+    await runPageTransition(() =>
+      playCreditsPlayerTransition(animationRows, targetRows, terminalRows, {
+        writeFrame: (entries) => writeCreditsTransitionRows(entries),
+        refreshIntervalMs: CREDITS_PLAYER_TRANSITION_REFRESH_MS
+      })
+    );
+    refreshCreditsTargetPage(targetRows, terminalRows);
   };
 
   const showCreditsFontRecommendation = () => {
@@ -1290,6 +1648,7 @@ export async function playWithProgress({
   };
 
   const cancelTrackTransition = (reason = '切歌操作已取消') => {
+    initialEntryTransitionController?.abort(new DOMException(reason, 'AbortError'));
     trackTransitionController?.abort(new DOMException(reason, 'AbortError'));
   };
 
@@ -1300,22 +1659,107 @@ export async function playWithProgress({
     cancelTrackTransition('播放已退出');
     enqueue(async () => {
       if (finished) return;
-      finished = true;
       if (refreshTimer) clearTimeout(refreshTimer);
-      await stopCurrent();
-      updateSmtc('stopped');
+      await runPlaybackExitSequence({
+        stop: async () => {
+          await stopCurrent();
+          updateSmtc('stopped');
+        },
+        transition: playDirectCreditsExitTransition,
+        onError: (error, stage) => logger?.warn('playback_exit_stage_failed', { stage, error })
+      });
+      finished = true;
       resolveCompletion(reason);
     });
   };
 
-  const drawHeader = async () => {
+  const verticalLayoutFor = (songSnapshot, terminalRows, terminalColumns, coverRows = 0) => {
+    const modeRowCount = playlistTracks.length
+      ? playbackPlaylistModeRows({
+          randomLabel: randomLabels[randomMode],
+          loopLabel: loopLabels[loopMode],
+          playlistOpen
+        }, terminalColumns).length
+      : 0;
+    const shortcutRowCount = playbackShortcutRows({
+      canFavorite: typeof onFavorite === 'function',
+      favorited: favoritedSongIds.has(String(songSnapshot?.id ?? ''))
+    }, terminalColumns).length;
+    return planPlaybackVerticalLayout({
+      rows: terminalRows,
+      coverRows,
+      metadataRows: playbackMetadataRows(songSnapshot, backendLabel, terminalColumns).length,
+      futureLyricRows: terminalRows,
+      modeRows: modeRowCount,
+      shortcutRows: shortcutRowCount,
+      statusRows: 1,
+      currentLyricRows: 1,
+      progressRows: 1
+    });
+  };
+
+  const prepareOrdinaryPlayerTransitionRows = async (transitionSignal) => {
+    const terminalRows = Math.max(1, process.stdout.rows || 24);
+    const terminalColumns = Math.max(1, process.stdout.columns || 80);
+    const desiredCoverRows = activeSong.cover && imageProtocol !== 'none'
+      ? playbackCoverRowBudget(terminalRows)
+      : 0;
+    let layout = verticalLayoutFor(activeSong, terminalRows, terminalColumns, desiredCoverRows);
+    const prepared = await buildTextPlaybackHeaderRows(activeSong, {
+      signal: transitionSignal,
+      backendLabel,
+      columns: terminalColumns,
+      layout
+    });
+    if (transitionSignal?.aborted) {
+      throw transitionSignal.reason ?? new DOMException('切歌转场已取消', 'AbortError');
+    }
+    if (prepared.coverRows.length !== layout.coverRows) {
+      layout = verticalLayoutFor(activeSong, terminalRows, terminalColumns, prepared.coverRows.length);
+    }
+    const headerRows = [
+      ...prepared.coverRows,
+      ...prepared.metadata.slice(0, layout.metadataRows)
+    ];
+    const elapsedMs = displayPosition(0, activeOffsetMs);
+    const dynamicRows = renderDynamic({
+      elapsedMs,
+      lyricElapsedMs: elapsedMs,
+      durationMs: activeDurationMs,
+      paused: userPaused,
+      lyrics,
+      showTranslation,
+      indicator,
+      playlist: playbackPlaylist,
+      playlistOpen: false,
+      playlistSelection,
+      playbackModeText: playlistTracks.length
+        ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen: false }
+        : '',
+      canFavorite: typeof onFavorite === 'function',
+      favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
+      dynamicRow: headerRows.length + 1,
+      dynamicAnchored: false,
+      currentLyricOnly: false,
+      easterEgg: null,
+      verticalLayout: layout,
+      captureOnly: true
+    });
+    return { rows: [...headerRows, ...dynamicRows], headerRows, layout, coverBuffer: prepared.coverBuffer };
+  };
+
+  const drawHeader = async (
+    transitionSignal = null,
+    { allowNativeGraphics = false, preloadedCoverBuffer = null } = {}
+  ) => {
     if (!tty) return;
     headerAbortController?.abort();
     const renderId = ++headerRenderId;
     const controller = new AbortController();
     headerAbortController = controller;
-    const headerSignal = signal
-      ? AbortSignal.any([signal, controller.signal])
+    const headerSignals = [signal, controller.signal, transitionSignal].filter(Boolean);
+    const headerSignal = headerSignals.length > 1
+      ? AbortSignal.any(headerSignals)
       : controller.signal;
     const songSnapshot = activeSong;
     headerRendering = true;
@@ -1323,23 +1767,44 @@ export async function playWithProgress({
     process.stdout.write('\x1b[2J\x1b[H');
     const initialRows = Math.max(1, process.stdout.rows || 24);
     const initialColumns = Math.max(1, process.stdout.columns || 80);
+    const desiredCoverRows = songSnapshot.cover && imageProtocol !== 'none'
+      ? playbackCoverRowBudget(initialRows)
+      : 0;
+    let verticalLayout = verticalLayoutFor(songSnapshot, initialRows, initialColumns, desiredCoverRows);
     const creditsConfig = easterEggForSong(songSnapshot);
-    const creditsTimeline = creditsConfig ? creditsEasterEggTimeline(
-      displayPosition(clock.position(), activeOffsetMs), initialRows) : null;
+    const creditsTimeline = creditsConfig ? creditsEasterEggTimelineForSong(
+      songSnapshot,
+      clock.position(),
+      displayPosition(clock.position(), activeOffsetMs),
+      initialRows
+    ) : null;
     if (creditsConfig?.mode === 'credits-csf') {
+      creditsPlayerVerticalLayout = verticalLayout;
       creditsTransitionHeaderRows = null;
       creditsPlayerHeaderRows = playbackMetadataRows(songSnapshot, backendLabel, initialColumns)
-        .slice(0, Math.max(0, initialRows - 1));
+        .slice(0, verticalLayout.metadataRows);
+      const normalizeCreditsHeader = (prepared) => {
+        const layout = prepared.coverRows.length === verticalLayout.coverRows
+          ? verticalLayout
+          : verticalLayoutFor(songSnapshot, initialRows, initialColumns, prepared.coverRows.length);
+        return {
+          layout,
+          rows: [...prepared.coverRows, ...prepared.metadata.slice(0, layout.metadataRows)]
+        };
+      };
       const creditsOrdinaryPlayer = ['player-intro', 'player'].includes(creditsTimeline?.phase);
       if (creditsOrdinaryPlayer) {
-        const preparedRows = await buildTextPlaybackHeaderRows(songSnapshot, {
-          signal: headerSignal, backendLabel, columns: initialColumns, rows: initialRows
-        });
-        if (controller.signal.aborted || renderId !== headerRenderId || finished) return;
-        creditsPlayerHeaderRows = preparedRows;
+        const prepared = normalizeCreditsHeader(await buildTextPlaybackHeaderRows(songSnapshot, {
+          signal: headerSignal, backendLabel, columns: initialColumns, layout: verticalLayout
+        }));
+        if (headerSignal.aborted || renderId !== headerRenderId || finished) return;
+        verticalLayout = prepared.layout;
+        creditsPlayerVerticalLayout = verticalLayout;
+        creditsPlayerHeaderRows = prepared.rows;
+        activeVerticalLayout = verticalLayout;
         creditsFullPlayerActive = true;
-        const headerOutput = preparedRows.map((row) => `${row}\x1b[0m\x1b[K`).join('\n');
-        dynamicRow = Math.min(initialRows, preparedRows.length + 1);
+        const headerOutput = prepared.rows.map((row) => `${row}\x1b[0m\x1b[K`).join('\n');
+        dynamicRow = Math.min(initialRows, prepared.rows.length + 1);
         process.stdout.write(
           `${headerOutput}${headerOutput ? '\n' : ''}\x1b[${dynamicRow};1H\x1b[s`
         );
@@ -1352,36 +1817,46 @@ export async function playWithProgress({
       // 两次逐行过渡使用可切分的 ANSI 封面快照；稳定彩蛋阶段将整屏留给 CSF。
       creditsFullPlayerActive = creditsTimeline?.phase === 'egg-transition';
       const prepareCreditsHeader = buildTextPlaybackHeaderRows(songSnapshot, {
-        signal: headerSignal, backendLabel, columns: initialColumns, rows: initialRows
+        signal: headerSignal, backendLabel, columns: initialColumns, layout: verticalLayout
       });
       if (creditsTimeline?.phase?.endsWith('-transition')) {
-        const preparedRows = await prepareCreditsHeader;
-        if (controller.signal.aborted || renderId !== headerRenderId || finished) return;
-        creditsPlayerHeaderRows = preparedRows;
+        const prepared = normalizeCreditsHeader(await prepareCreditsHeader);
+        if (headerSignal.aborted || renderId !== headerRenderId || finished) return;
+        creditsPlayerVerticalLayout = prepared.layout;
+        creditsPlayerHeaderRows = prepared.rows;
       } else {
-        void prepareCreditsHeader.then((preparedRows) => {
-          if (!controller.signal.aborted && renderId === headerRenderId && !finished
+        void prepareCreditsHeader.then(normalizeCreditsHeader).then((prepared) => {
+          if (!headerSignal.aborted && renderId === headerRenderId && !finished
               && String(activeSong?.id ?? '') === String(songSnapshot.id ?? '')) {
-            creditsPlayerHeaderRows = preparedRows;
+            creditsPlayerVerticalLayout = prepared.layout;
+            creditsPlayerHeaderRows = prepared.rows;
           }
         });
       }
       dynamicRow = 1;
+      activeVerticalLayout = null;
       process.stdout.write('\x1b[s');
       dynamicAnchored = true;
       headerRendering = false;
       render();
       return;
     }
-    const coverRows = initialRows >= 10
+    const coverRows = verticalLayout.coverRows > 0
       ? await tryRenderImage(songSnapshot.cover, {
           signal: headerSignal,
           size: 'playback',
           protocol: imageProtocol,
-          shouldRender: () => renderId === headerRenderId && !finished
+          maxRows: verticalLayout.coverRows,
+          allowNativeGraphics,
+          preloadedBuffer: preloadedCoverBuffer,
+          shouldRender: () => !headerSignal.aborted && renderId === headerRenderId && !finished
         })
       : 0;
-    if (controller.signal.aborted || renderId !== headerRenderId || finished) return;
+    if (headerSignal.aborted || renderId !== headerRenderId || finished) return;
+    if (coverRows !== verticalLayout.coverRows) {
+      verticalLayout = verticalLayoutFor(songSnapshot, initialRows, initialColumns, coverRows);
+    }
+    activeVerticalLayout = verticalLayout;
     const artists = Array.isArray(songSnapshot.artists) ? songSnapshot.artists.join('/') : songSnapshot.artist;
     const metadata = [
       chalk.bold(truncateText(songSnapshot.name || songSnapshot.title || '', initialColumns)),
@@ -1390,9 +1865,8 @@ export async function playWithProgress({
       truncateText(`播放器：${backendLabel}`, initialColumns),
       truncateText(`ID：${songSnapshot.id ?? ''}`, initialColumns)
     ];
-    const metadataCapacity = Math.max(0, initialRows - coverRows - 1);
-    for (const line of metadata.slice(0, metadataCapacity)) console.log(line);
-    dynamicRow = Math.min(initialRows, coverRows + Math.min(metadata.length, metadataCapacity) + 1);
+    for (const line of metadata.slice(0, verticalLayout.metadataRows)) console.log(line);
+    dynamicRow = Math.min(initialRows, coverRows + Math.min(metadata.length, verticalLayout.metadataRows) + 1);
     process.stdout.write('\x1b[s');
     dynamicAnchored = true;
     headerRendering = false;
@@ -1420,9 +1894,14 @@ export async function playWithProgress({
     }
 
     const oldPosition = clock.position();
+    const leavingDirectAnimation = Boolean(easterEggForSong(activeSong)?.directAnimation);
     const wasPlaying = Boolean(child && !userPaused);
     setIndicator(`正在切换到 ${targetIndex + 1}/${playlistTracks.length}`);
     render();
+    const leavingCreditsRows = leavingDirectAnimation
+      ? captureDirectCreditsAnimationRows(oldPosition)
+      : [];
+    if (leavingDirectAnimation && refreshTimer) clearTimeout(refreshTimer);
     if (wasPlaying) clock.pause();
     // 用户发出切歌请求后先立即停止声音；网络加载时间不会继续吞掉旧曲时间。
     await stopCurrent();
@@ -1494,17 +1973,81 @@ export async function playWithProgress({
     invalidateRestart();
     if (closing) return transitionCancelled;
     updateSmtcControls();
-    if (!userPaused) {
-      await spawnAt(0);
-      clock.resume();
+    const directAnimation = Boolean(easterEggForSong(activeSong)?.directAnimation);
+    let started;
+    if (leavingDirectAnimation && !directAnimation) {
+      try {
+        const prepared = await prepareOrdinaryPlayerTransitionRows(transitionController.signal);
+        await runPageTransition(() =>
+          playCreditsPlayerTransition(
+            leavingCreditsRows,
+            prepared.rows,
+            Math.max(1, process.stdout.rows || 24),
+            {
+              signal: transitionController.signal,
+              writeFrame: (entries) => writeCreditsTransitionRows(entries),
+              refreshIntervalMs: CREDITS_PLAYER_TRANSITION_REFRESH_MS
+            }
+          )
+        );
+        try {
+          // 转场快照必须使用可逐行组合的 ANSI 文本；稳定页面则重新走正式
+          // header 渲染，以便按 imageProtocol 使用 Kitty/SIXEL/chafa/ANSI。
+          await drawHeader(transitionController.signal, {
+            allowNativeGraphics: true,
+            preloadedCoverBuffer: prepared.coverBuffer
+          });
+        } catch (headerError) {
+          if (headerError?.name === 'AbortError') throw headerError;
+          void logger?.warn('playback_header_failed', { error: headerError });
+          const terminalRows = Math.max(1, process.stdout.rows || 24);
+          refreshCreditsTargetPage(prepared.rows, terminalRows);
+          creditsPlayerHeaderRows = prepared.headerRows;
+          activeVerticalLayout = prepared.layout;
+          dynamicRow = Math.min(terminalRows, prepared.headerRows.length + 1);
+          dynamicAnchored = true;
+          headerRendering = false;
+          process.stdout.write(`\x1b[${dynamicRow};1H\x1b[s`);
+        }
+        if (closing || transitionController.signal.aborted) return transitionCancelled;
+        if (!userPaused) {
+          await spawnAt(0);
+          if (closing || transitionController.signal.aborted) return transitionCancelled;
+          clock.resume();
+        } else {
+          updateSmtc('paused', 0);
+        }
+      } catch (error) {
+        if (closing || transitionController.signal.aborted || error?.name === 'AbortError') {
+          return transitionCancelled;
+        }
+        throw error;
+      }
+      started = true;
     } else {
-      updateSmtc('paused', 0);
+      started = await startTrackWithPreparedHeader({
+        directAnimation,
+        drawHeader: directAnimation
+          ? () => playDirectCreditsEntryTransition(transitionController.signal)
+          : () => drawHeader(transitionController.signal),
+        signal: transitionController.signal,
+        startPlayback: async () => {
+          if (closing || transitionController.signal.aborted) return;
+          if (!userPaused) {
+            await spawnAt(0);
+            if (closing || transitionController.signal.aborted) return;
+            clock.resume();
+          } else {
+            updateSmtc('paused', 0);
+          }
+        },
+        onHeaderError: (error) => {
+          if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
+          if (directAnimation) throw error;
+        }
+      });
     }
-    // 新音频先开始播放；封面在可取消的后台任务中绘制，
-    // 不占用按键和 SMTC 共用的串行控制队列。
-    void drawHeader().catch((error) => {
-      if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
-    });
+    if (!started || closing || transitionController.signal.aborted) return transitionCancelled;
     if (!showCreditsFontRecommendation()) {
       setIndicator(userPaused
         ? `已暂停 ${resolvedIndex + 1}/${playlistTracks.length}`
@@ -1540,6 +2083,11 @@ export async function playWithProgress({
     // 单曲自然结束后保留最后元数据与最终时间戳，但不再处理系统控制。
     sessionControlsEnabled = false;
     smtc.updateControls({ canPrevious: false, canNext: false });
+    await runPlaybackExitSequence({
+      stop: stopCurrent,
+      transition: playDirectCreditsExitTransition,
+      onError: (error, stage) => logger?.warn('playback_exit_stage_failed', { stage, error })
+    });
     retainSmtc = true;
     retainedSmtcBridge = smtc;
     finished = true;
@@ -1557,6 +2105,7 @@ export async function playWithProgress({
       return;
     }
     if (closing) return;
+    if (pageTransitionDepth > 0) return;
     if (action.type === 'refresh') {
       setIndicator('页面已刷新');
       if (creditsPlayerTransitionActive()) {
@@ -1622,6 +2171,9 @@ export async function playWithProgress({
       setIndicator(`随机模式：${randomLabels[randomMode]}`);
       updateSmtcControls();
       render();
+      void drawHeader().catch((error) => {
+        if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
+      });
       return;
     }
     if (action.type === 'cycle_loop_mode' && playlistTracks.length) {
@@ -1629,6 +2181,9 @@ export async function playWithProgress({
       setIndicator(`循环模式：${loopLabels[loopMode]}`);
       updateSmtcControls();
       render();
+      void drawHeader().catch((error) => {
+        if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
+      });
       return;
     }
     if (action.type === 'favorite' && typeof onFavorite === 'function') {
@@ -1648,6 +2203,9 @@ export async function playWithProgress({
           setIndicator(result?.alreadyPresent ? '当前歌曲已在喜欢的音乐中' : '已添加至喜欢的音乐');
         }
         render();
+        void drawHeader().catch((error) => {
+          if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
+        });
       }, (error) => {
         if (error?.name !== 'AbortError') {
           void logger?.warn('favorite_song_failed', { songId, error });
@@ -1764,7 +2322,7 @@ export async function playWithProgress({
 
   let restoreInput = () => {};
   const resizeRefresh = createLatestDebounce(() => {
-    if (finished || closing) return;
+    if (finished || closing || trackTransitioning || pageTransitionDepth > 0) return;
     if (creditsPlayerTransitionActive()) return;
     void drawHeader().catch((error) => {
       if (error?.name !== 'AbortError') void logger?.warn('playback_resize_refresh_failed', { error });
@@ -1820,10 +2378,32 @@ export async function playWithProgress({
     }
     if (!persistentController) backendLabel = playerBackendLabel(player.command, { persistent: false });
     if (tty) {
-      process.stdout.write(`${playbackTerminalModeSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
-      await drawHeader();
-      restoreInput = setupRawInput(rl, handleData);
-      process.stdout.on('resize', resize);
+      const directAnimation = Boolean(easterEggForSong(activeSong)?.directAnimation);
+      process.stdout.write(playbackEntrySequence(directAnimation));
+      if (directAnimation) {
+        restoreInput = setupRawInput(rl, handleData);
+        process.stdout.on('resize', resize);
+        showCreditsFontRecommendation();
+        const transitionController = new AbortController();
+        initialEntryTransitionController = transitionController;
+        const transitionSignal = signal
+          ? AbortSignal.any([signal, transitionController.signal])
+          : transitionController.signal;
+        try {
+          await playDirectCreditsEntryTransition(transitionSignal);
+        } catch (error) {
+          if (!(closing && transitionController.signal.aborted && error?.name === 'AbortError')) throw error;
+        } finally {
+          if (initialEntryTransitionController === transitionController) {
+            initialEntryTransitionController = null;
+          }
+        }
+        if (closing) return await completion;
+      } else {
+        await drawHeader();
+        restoreInput = setupRawInput(rl, handleData);
+        process.stdout.on('resize', resize);
+      }
     }
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();

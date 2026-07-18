@@ -51,6 +51,43 @@ function runCli(args, { env }) {
   });
 }
 
+function runClearCli({ env }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(projectRoot, 'bin', 'ncm.js')], {
+      cwd: projectRoot,
+      env: { ...process.env, ...env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+    let stdout = '';
+    let stderr = '';
+    let stage = 0;
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error(`CLI 清屏流程测试超时\n${stdout}\n${stderr}`));
+    }, 10000);
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stage === 0 && /或者输入指令/.test(stdout)) {
+        stage = 1;
+        child.stdin.write('/clear\n');
+      } else if (stage === 1 && /\x1b\[3J\x1b\[2J\x1b\[H[\s\S]*NCM CLI 点歌台[\s\S]*或者输入指令/.test(stdout)) {
+        stage = 2;
+        child.stdin.end('/quit\n');
+      }
+    });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal, stdout, stderr, stage });
+    });
+  });
+}
+
 test('普通搜索的歌曲详情退出后直接回到主页', { timeout: 15000 }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'ncm-search-flow-'));
   const rawSong = {
@@ -85,6 +122,32 @@ test('普通搜索的歌曲详情退出后直接回到主页', { timeout: 15000 
     assert.doesNotMatch(result.stdout, /无效序号/);
     assert.match(result.stdout, /搜索歌曲、输入 ID 点歌/);
     assert.equal(receivedLimit, '17');
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('/clear 清屏后重新显示主页横幅和输入提示', { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'ncm-clear-flow-'));
+  const server = http.createServer((_request, response) => {
+    response.statusCode = 404;
+    response.end('{"message":"not found"}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    await saveSettings({ apiBaseUrl: baseUrl }, path.join(directory, 'settings.json'));
+    const result = await runClearCli({
+      env: { NCM_CLI_CONFIG_DIR: directory, NCM_API_BASE_URL: '' }
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stage, 2, result.stdout);
+    assert.match(result.stdout, /\x1b\[3J\x1b\[2J\x1b\[H[\s\S]*NCM CLI 点歌台/);
+    assert.equal((result.stdout.match(/NCM CLI 点歌台/g) || []).length, 2);
+    assert.ok((result.stdout.match(/或者输入指令/g) || []).length >= 2);
   } finally {
     server.close();
     await once(server, 'close');

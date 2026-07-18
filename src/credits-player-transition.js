@@ -39,3 +39,90 @@ export function composeCreditsPlayerTransitionRows(sourceRows, targetRows, elaps
     return { state, text: state === 'source' ? source : target };
   });
 }
+
+export function creditsPageRevealRows(targetRows, elapsedMs, rowCount) {
+  const rows = Math.max(1, Math.ceil(Number(rowCount) || 1));
+  const timing = creditsPlayerTransitionTiming(rows);
+  return Array.from({ length: rows }, (_, index) => {
+    const ageMs = Number(elapsedMs) - index * timing.staggerMs;
+    if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+    const state = creditsPlayerTransitionRowState(elapsedMs, index, rows);
+    return {
+      index,
+      state: state === 'source' ? 'target' : state,
+      text: targetRows[index] ?? ''
+    };
+  }).filter(Boolean);
+}
+
+async function waitForTransitionDelay(wait, delayMs, signal) {
+  if (!signal) return wait(delayMs);
+  if (signal.aborted) throw signal.reason ?? new DOMException('转场已取消', 'AbortError');
+  await new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new DOMException('转场已取消', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(wait(delayMs)).then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); }
+    );
+  });
+}
+
+export async function playCreditsPlayerTransition(
+  sourceRows,
+  targetRows,
+  rowCount,
+  {
+    writeFrame,
+    signal,
+    now = () => performance.now(),
+    wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+    refreshIntervalMs = CREDITS_PLAYER_TRANSITION_REFRESH_MS
+  } = {}
+) {
+  if (typeof writeFrame !== 'function') throw new TypeError('writeFrame 必须是函数');
+  const timing = creditsPlayerTransitionTiming(rowCount);
+  const startedAt = now();
+  let frameCount = 0;
+  while (true) {
+    if (signal?.aborted) throw signal.reason ?? new DOMException('转场已取消', 'AbortError');
+    const elapsedMs = Math.min(timing.durationMs, Math.max(0, now() - startedAt));
+    await writeFrame(composeCreditsPlayerTransitionRows(sourceRows, targetRows, elapsedMs, rowCount), elapsedMs);
+    frameCount += 1;
+    if (elapsedMs >= timing.durationMs) return { frameCount, durationMs: timing.durationMs };
+    await waitForTransitionDelay(
+      wait, Math.min(refreshIntervalMs, timing.durationMs - elapsedMs), signal
+    );
+  }
+}
+
+export async function playCreditsPageRevealTransition(
+  targetRows,
+  rowCount,
+  {
+    writeFrame,
+    signal,
+    now = () => performance.now(),
+    wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+    refreshIntervalMs = CREDITS_PLAYER_TRANSITION_REFRESH_MS
+  } = {}
+) {
+  if (typeof writeFrame !== 'function') throw new TypeError('writeFrame 必须是函数');
+  const timing = creditsPlayerTransitionTiming(rowCount);
+  const startedAt = now();
+  let frameCount = 0;
+  while (true) {
+    if (signal?.aborted) throw signal.reason ?? new DOMException('转场已取消', 'AbortError');
+    const elapsedMs = Math.min(timing.durationMs, Math.max(0, now() - startedAt));
+    await writeFrame(creditsPageRevealRows(targetRows, elapsedMs, rowCount), elapsedMs);
+    frameCount += 1;
+    if (elapsedMs >= timing.durationMs) return { frameCount, durationMs: timing.durationMs };
+    await waitForTransitionDelay(
+      wait, Math.min(refreshIntervalMs, timing.durationMs - elapsedMs), signal
+    );
+  }
+}

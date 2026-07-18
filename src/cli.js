@@ -15,7 +15,7 @@ import { secondaryText } from './terminal-theme.js';
 import { resolveNeteaseMusicInput } from './music-link.js';
 import { writeExport } from './output-file.js';
 import { cleanupStalePlayerSessions } from './player-registry.js';
-import { creditsFontRecommendation } from './credits-csf.js';
+import { creditsFontRecommendation, easterEggForSong } from './credits-csf.js';
 import {
   loadSettings, saveSettings, MIN_LYRIC_OFFSET_MS, MAX_LYRIC_OFFSET_MS
 } from './settings-store.js';
@@ -67,7 +67,7 @@ ${chalk.bold('命令')}
   /quality [level]                        查看、选择或直接设置播放音质
   /player [auto|mpv|vlc|ffplay]           查看、选择或指定播放器后端
   /image [协议]                           查看、选择或指定终端图片协议
-  /offset [毫秒]                          查看或设置播放时间偏移（默认 2000）
+  /offset [毫秒]                          查看或设置播放时间偏移（默认 0）
   /api [url]                              查看或更换 API 地址
   /clear                                  清空终端并返回搜索
   /help                                   显示帮助
@@ -213,22 +213,58 @@ export function songLyricPreviewRemaining(lyrics, capacity) {
   return Math.max(0, lines.length - Math.max(0, Math.floor(Number(capacity) || 0)));
 }
 
+export function songDetailMetadataLines(song, platform = process.platform) {
+  const recommendation = creditsFontRecommendation(song, platform);
+  return [
+    song.name,
+    `歌手：${song.artists.join('/') || '未知'}`,
+    `专辑：${song.album}`,
+    `ID：${song.id}`,
+    `时长：${formatDuration(song.durationMs)}`,
+    ...(recommendation ? [recommendation] : [])
+  ];
+}
+
 async function showSong(song, signal, imageProtocol = 'auto', lyrics = null) {
   console.log();
+  let transitionCoverRows = [];
   const coverRows = song.cover
-    ? await tryRenderImage(song.cover, { signal, size: 'detail', protocol: imageProtocol })
+    ? await tryRenderImage(song.cover, {
+        signal,
+        size: 'detail',
+        protocol: imageProtocol,
+        onTextRows: easterEggForSong(song)?.directAnimation
+          ? (rows) => { transitionCoverRows = rows; }
+          : undefined
+      })
     : 0;
-  console.log(chalk.bold.green(song.name));
-  console.log(`歌手：${song.artists.join('/') || '未知'}\n专辑：${song.album}\nID：${song.id}\n时长：${formatDuration(song.durationMs)}`);
-  const previewCapacity = Math.max(0, (output.rows || 24) - coverRows - 10);
+  const metadataLines = songDetailMetadataLines(song);
+  console.log(chalk.bold.green(metadataLines[0]));
+  console.log(metadataLines.slice(1).join('\n'));
+  const transitionRows = [
+    '',
+    ...transitionCoverRows.slice(0, coverRows),
+    ...Array.from({ length: Math.max(0, coverRows - transitionCoverRows.length) }, () => ''),
+    chalk.bold.green(metadataLines[0]),
+    ...metadataLines.slice(1)
+  ];
+  const fontRecommendation = creditsFontRecommendation(song);
+  const previewCapacity = Math.max(0, (output.rows || 24) - coverRows - 10 - (fontRecommendation ? 1 : 0));
   const capacity = Math.max(0, previewCapacity - 1);
   const preview = songLyricPreview(lyrics, capacity);
   if (preview.length) {
     console.log(chalk.bold('\n歌词预览'));
+    transitionRows.push('', chalk.bold('歌词预览'));
     for (const line of preview) console.log(chalk.white(line));
+    transitionRows.push(...preview.map((line) => chalk.white(line)));
     const remaining = songLyricPreviewRemaining(lyrics, capacity);
-    if (remaining) console.log(secondaryText(`另有 ${remaining} 行`));
+    if (remaining) {
+      const remainingText = secondaryText(`另有 ${remaining} 行`);
+      console.log(remainingText);
+      transitionRows.push(remainingText);
+    }
   }
+  return transitionRows;
 }
 
 async function refreshAuthState(api, authState, signal, logger) {
@@ -262,10 +298,16 @@ async function refreshAuthState(api, authState, signal, logger) {
   return authState;
 }
 
+function loginStatusText(authState) {
+  if (authState.loggedIn) return `已登录${authState.profile?.nickname ? `：${authState.profile.nickname}` : ''}`;
+  if (!authState.verified) return '存在缓存 Cookie，但暂时无法向服务端验证登录状态。';
+  return '未登录，或缓存 Cookie 已失效。';
+}
+
 function printLoginStatus(authState, { detailed = false } = {}) {
   const { account, profile, level } = authState;
+  console.log(loginStatusText(authState));
   if (authState.loggedIn) {
-    console.log(`已登录${profile?.nickname ? `：${profile.nickname}` : ''}`);
     if (!detailed) return;
     const vipType = profile?.vipType ?? account?.vipType;
     const fields = [
@@ -283,8 +325,36 @@ function printLoginStatus(authState, { detailed = false } = {}) {
       if (value !== null && value !== undefined && value !== '') console.log(`${label}：${value}`);
     }
   }
-  else if (!authState.verified) console.log('存在缓存 Cookie，但暂时无法向服务端验证登录状态。');
-  else console.log('未登录，或缓存 Cookie 已失效。');
+}
+
+export function homeBannerLines({ apiBaseUrl, playerCommand, playerBackend, authState, logFile }) {
+  return [
+    'NCM CLI 点歌台',
+    `API：${apiBaseUrl}`,
+    `播放器：${playerBackendLabel(playerCommand)}（设置：${playerBackend}）`,
+    loginStatusText(authState),
+    `日志：${logFile}`,
+    '输入 /help 查看命令。'
+  ];
+}
+
+export function homePromptText(loggedIn = false) {
+  return loggedIn
+    ? '\n搜索歌曲、输入 ID 点歌，或者输入指令 > '
+    : '\n搜索歌曲、输入 ID 点歌，或者输入指令（可使用 /login 登录） > ';
+}
+
+function printHomeBanner(api, context) {
+  const homePlayer = findPlayer(playerCommandsForBackend(context.settings.playerBackend));
+  const lines = homeBannerLines({
+    apiBaseUrl: api.baseUrl,
+    playerCommand: homePlayer?.command,
+    playerBackend: context.settings.playerBackend,
+    authState: context.authState,
+    logFile: context.logger.file
+  });
+  console.log(chalk.bold.cyan(lines[0]));
+  for (const line of lines.slice(1)) console.log(line);
 }
 
 async function handleSignout(api, authState, signal, logger) {
@@ -608,7 +678,7 @@ async function updateLikedPlaylist(api, song, context, operation = 'add') {
     : api.addPlaylistTracks(playlistId, [song.id], { signal: context.signal });
 }
 
-async function playSong(api, song, context, rl, cachedLyrics = null) {
+async function playSong(api, song, context, rl, cachedLyrics = null, returnPageRows = []) {
   const { signal, logger, authState, shutdown } = context;
   const result = await api.songUrl(song.id, { signal });
   if (!result?.url) {
@@ -636,6 +706,7 @@ async function playSong(api, song, context, rl, cachedLyrics = null) {
     onFavorite: authState.loggedIn
       ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
       : undefined,
+    returnPageRows,
     onInterrupt: () => shutdown('playback_ctrl_c')
   });
   return lyrics;
@@ -669,7 +740,7 @@ async function songMenuInScreen(rl, api, song, context) {
       () => showSong(song, signal, context.settings.imageProtocol, cachedLyrics),
       () => detailFooterPrompt(
         chalk.yellow(songDetailPrompt({ loggedIn: authState.loggedIn, favorited })),
-        songDetailFooterLines(song, linksVisible ? songLinks : [])
+        linksVisible ? songLinks : []
       ),
       authState.loggedIn ? ['p', 'l', 'u', 'f', 'q'] : ['p', 'l', 'u', 'q'],
       context
@@ -717,8 +788,9 @@ async function songMenuInScreen(rl, api, song, context) {
       }
       if (/^(?:p|play|播放)$/i.test(action)) {
         linksVisible = false;
+        const returnPageRows = page.transitionRows;
         page.close();
-        cachedLyrics = await playSong(api, song, context, rl, cachedLyrics);
+        cachedLyrics = await playSong(api, song, context, rl, cachedLyrics, returnPageRows);
         continue;
       }
       console.log('未知选项，请输入 p、l、u 或 q。');
@@ -731,11 +803,6 @@ async function songMenuInScreen(rl, api, song, context) {
 export function songDetailPrompt({ loggedIn = false, favorited = false } = {}) {
   const favorite = loggedIn ? ` [f]${favorited ? '取消收藏' : '收藏'}` : '';
   return `[p]播放 [l]歌词导出 [u]播放链接${favorite} [q]返回 > `;
-}
-
-export function songDetailFooterLines(song, lines = []) {
-  const recommendation = creditsFontRecommendation(song);
-  return recommendation ? [recommendation, ...lines] : [...lines];
 }
 
 function playlistCreatorName(playlist) {
@@ -778,13 +845,21 @@ async function openDetailPage(rl, render, prompt, keys, context) {
     releaseScreen();
   };
   try {
+    let transitionBodyRows = [];
     const redraw = async () => {
       if (tty) output.write('\x1b[2J\x1b[H');
-      await render();
+      const renderedRows = await render();
+      if (Array.isArray(renderedRows)) transitionBodyRows = renderedRows;
     };
     await redraw();
-    const action = await readDetailAction(rl, prompt, keys, context, redraw);
-    return { action, close, tty };
+    const promptText = typeof prompt === 'function' ? prompt() : prompt;
+    const action = await readDetailAction(rl, promptText, keys, context, redraw);
+    return {
+      action,
+      close,
+      tty,
+      transitionRows: detailPageTransitionRows(transitionBodyRows, promptText)
+    };
   } catch (error) {
     close();
     throw error;
@@ -795,6 +870,22 @@ export function detailOverlaySequence(rows, reservedRows) {
   const height = Math.max(1, Number(rows) || 24);
   const startRow = Math.max(1, height - Math.max(1, reservedRows) + 1);
   return `\x1b[${startRow};1H\x1b[0J`;
+}
+
+export function detailPageTransitionRows(bodyRows, prompt, rows = output.rows) {
+  const height = Math.max(1, Math.floor(Number(rows) || 24));
+  const frame = Array.from({ length: height }, () => '');
+  for (let index = 0; index < Math.min(height, bodyRows?.length || 0); index += 1) {
+    frame[index] = String(bodyRows[index] ?? '');
+  }
+  const source = String(prompt ?? '');
+  const overlay = /^\x1b\[(\d+);1H\x1b\[0J([\s\S]*)$/.exec(source);
+  const start = overlay ? Math.max(0, Number(overlay[1]) - 1) : Math.max(0, height - 1);
+  const lines = (overlay ? overlay[2] : source).split(/\r?\n/);
+  for (let index = 0; index < lines.length && start + index < height; index += 1) {
+    frame[start + index] = lines[index];
+  }
+  return frame;
 }
 
 function prepareDetailOverlay(reservedRows) {
@@ -907,6 +998,7 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     onFavorite: context.authState.loggedIn
       ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
       : undefined,
+    returnPageRows: context.returnPageRows,
     onInterrupt: () => context.shutdown('playback_ctrl_c'),
     onTrackChange: async (targetIndex, cause, transitionSignal) => {
       const step = targetIndex < activeIndex ? -1 : 1;
@@ -958,24 +1050,47 @@ async function playlistMenuInScreen(rl, api, id, context) {
   ];
   const renderDetail = async () => {
     console.log();
+    let transitionCoverRows = [];
     const coverRows = cover ? await tryRenderImage(cover, {
-      signal: context.signal, size: 'detail', protocol: context.settings.imageProtocol
+      signal: context.signal,
+      size: 'detail',
+      protocol: context.settings.imageProtocol,
+      onTextRows: (rows) => { transitionCoverRows = rows; }
     }) : 0;
-    console.log(chalk.bold.green(playlist.name || `歌单 ${id}`));
-    console.log(`创建者：${playlistCreatorName(playlist)}`);
-    console.log(`歌曲数：${playlist.trackCount ?? previewTracks.length}`);
-    console.log(`播放量：${formatCount(playlist.playCount)}`);
-    console.log(`ID：${playlist.id || id}`);
-    if (playlist.description) console.log(`描述：${String(playlist.description).replace(/\s+/g, ' ').trim()}`);
+    const transitionRows = [
+      '',
+      ...transitionCoverRows.slice(0, coverRows),
+      ...Array.from({ length: Math.max(0, coverRows - transitionCoverRows.length) }, () => '')
+    ];
+    const title = chalk.bold.green(playlist.name || `歌单 ${id}`);
+    const metadata = [
+      `创建者：${playlistCreatorName(playlist)}`,
+      `歌曲数：${playlist.trackCount ?? previewTracks.length}`,
+      `播放量：${formatCount(playlist.playCount)}`,
+      `ID：${playlist.id || id}`,
+      ...(playlist.description ? [`描述：${String(playlist.description).replace(/\s+/g, ' ').trim()}`] : [])
+    ];
+    console.log(title);
+    console.log(metadata.join('\n'));
+    transitionRows.push(title, ...metadata);
     console.log(chalk.bold('\n歌曲预览'));
+    transitionRows.push('', chalk.bold('歌曲预览'));
     const limit = Math.max(1, playlistPreviewLimit(output.rows, coverRows, Boolean(playlist.description))
       - (linksVisible ? 2 : 0) - 1);
     previewTracks.slice(0, limit).forEach((song, index) => {
-      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${song.name} — ${song.artists?.join('/') || '未知歌手'} ${secondaryText(`[${song.id}]`)}`);
+      const line = `${chalk.cyan(String(index + 1).padStart(2))}. ${song.name} — ${song.artists?.join('/') || '未知歌手'} ${secondaryText(`[${song.id}]`)}`;
+      console.log(line);
+      transitionRows.push(line);
     });
     const remaining = Math.max(0, (playlist.trackCount ?? previewTracks.length) - Math.min(limit, previewTracks.length));
-    if (remaining) console.log(secondaryText(`另有 ${remaining} 首`));
+    if (remaining) {
+      const remainingText = secondaryText(`另有 ${remaining} 首`);
+      console.log(remainingText);
+      transitionRows.push(remainingText);
+    }
     console.log();
+    transitionRows.push('');
+    return transitionRows;
   };
 
   while (true) {
@@ -998,9 +1113,10 @@ async function playlistMenuInScreen(rl, api, id, context) {
     }
     if (/^(?:p|play|播放)$/i.test(raw)) {
       linksVisible = false;
+      const returnPageRows = page.transitionRows;
       page.close();
       const tracks = await loadFullTracks();
-      await playPlaylist(api, playlist, tracks, 0, { ...context, rl });
+      await playPlaylist(api, playlist, tracks, 0, { ...context, rl, returnPageRows });
       continue;
     }
     if (/^(?:l|list|列表)$/i.test(raw)) {
@@ -1009,6 +1125,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
       const tracks = await loadFullTracks();
       let selected;
       let selectedIndex = 0;
+      let returnPageRows = [];
       if (input.isTTY && output.isTTY) {
         while (true) {
           const result = await selectTerminalList({
@@ -1021,7 +1138,8 @@ async function playlistMenuInScreen(rl, api, id, context) {
             detailAction: 'detail',
             itemText: (song, index) => `${String(index + 1).padStart(2)}. ${song.name} — ${song.artists?.join('/') || '未知歌手'}`,
             signal: context.signal,
-            onInterrupt: () => context.shutdown('playlist_tracks_ctrl_c')
+            onInterrupt: () => context.shutdown('playlist_tracks_ctrl_c'),
+            onFrame: (rows) => { returnPageRows = rows; }
           });
           if (result === null) break;
           selectedIndex = typeof result === 'number' ? result : result.index;
@@ -1039,7 +1157,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
         if (!/^q$/i.test(rawSelection)) selected = Number(rawSelection) - 1;
       }
       if (Number.isInteger(selected) && selected >= 0 && selected < tracks.length) {
-        await playPlaylist(api, playlist, tracks, selected, { ...context, rl });
+        await playPlaylist(api, playlist, tracks, selected, { ...context, rl, returnPageRows });
       }
       continue;
     }
@@ -1152,25 +1270,32 @@ async function chooseSong(rl, api, songs, context) {
 
 async function chooseSongInScreen(rl, api, songs, context) {
   if (input.isTTY && output.isTTY && typeof input.setRawMode === 'function') {
-    const selection = await selectTerminalList({
-      rl,
-      items: songs,
-      title: '搜索结果',
-      hint: '↑/↓ 或滚轮选择  Enter 查看  空格 播放  q/Esc 返回主页',
-      alternateAction: 'play',
-      itemText: (song, index) => `${String(index + 1).padStart(2)}. ${song.name} — ${song.artists.join('/') || '未知歌手'} [${song.id}] ${formatDuration(song.durationMs)}`,
-      signal: context.signal,
-      onInterrupt: () => context.shutdown('search_list_ctrl_c')
-    });
-    if (selection == null) return;
-    const selectedIndex = typeof selection === 'number' ? selection : selection.index;
-    const detail = await api.songDetail(songs[selectedIndex].id, { signal: context.signal });
-    if (typeof selection === 'object' && selection.action === 'play') {
-      await playSong(api, detail, context, rl);
+    let selectedIndex = 0;
+    while (true) {
+      let returnPageRows = [];
+      const selection = await selectTerminalList({
+        rl,
+        items: songs,
+        initialIndex: selectedIndex,
+        title: '搜索结果',
+        hint: '↑/↓ 或滚轮选择  Enter 查看  空格 播放  q/Esc 返回主页',
+        alternateAction: 'play',
+        itemText: (song, index) => `${String(index + 1).padStart(2)}. ${song.name} — ${song.artists.join('/') || '未知歌手'} [${song.id}] ${formatDuration(song.durationMs)}`,
+        signal: context.signal,
+        onInterrupt: () => context.shutdown('search_list_ctrl_c'),
+        onFrame: (rows) => { returnPageRows = rows; }
+      });
+      if (selection == null) return;
+      selectedIndex = typeof selection === 'number' ? selection : selection.index;
+      const detail = await api.songDetail(songs[selectedIndex].id, { signal: context.signal });
+      if (typeof selection === 'object' && selection.action === 'play') {
+        await playSong(api, detail, context, rl, null, returnPageRows);
+        if (easterEggForSong(detail)?.directAnimation) continue;
+        return;
+      }
+      await songMenu(rl, api, detail, context);
       return;
     }
-    await songMenu(rl, api, detail, context);
-    return;
   }
 
   while (true) {
@@ -1241,7 +1366,8 @@ async function resolveInput(rl, api, raw, context) {
     return;
   }
   if (parseClearCommand(raw)) {
-    output.write('\x1b[2J\x1b[H');
+    output.write('\x1b[3J\x1b[2J\x1b[H');
+    printHomeBanner(api, context);
     return;
   }
   const offset = parseOffsetCommand(raw);
@@ -1387,21 +1513,14 @@ export async function main(args = []) {
     const authState = { loggedIn: false, verified: false, account: null, profile: null, level: null };
     await refreshAuthState(api, authState, controller.signal, logger);
 
-    console.log(chalk.bold.cyan('NCM CLI 点歌台'));
-    console.log(`API：${api.baseUrl}`);
-    const homePlayer = findPlayer(playerCommandsForBackend(settings.playerBackend));
-    console.log(`播放器：${playerBackendLabel(homePlayer?.command)}（设置：${settings.playerBackend}）`);
-    printLoginStatus(authState);
-    console.log(`日志：${logger.file}`);
-    console.log('输入 /help 查看命令。');
-
     const context = {
       authState, signal: controller.signal, logger, settings, shutdown,
       apiFromEnvironment: apiConfiguration.fromEnvironment
     };
+    printHomeBanner(api, context);
     if (args.length && !apiConfiguredFromArguments) await resolveInput(rl, api, args.join(' '), context);
     while (!controller.signal.aborted) {
-      const prompt = authState.loggedIn ? '\n搜索歌曲、输入 ID 点歌 > ' : '\n搜索歌曲、输入 ID 点歌，或 /login > ';
+      const prompt = homePromptText(authState.loggedIn);
       let raw;
       try {
         raw = (await ask(rl, chalk.green(prompt), controller.signal, { recordHistory: true })).trim();

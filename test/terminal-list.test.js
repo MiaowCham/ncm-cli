@@ -99,12 +99,16 @@ test('终端列表仅在启用备用动作时允许空格确认', async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
   const rl = { pause() {}, resume() {}, write() {} };
+  let frameRows = [];
   const selection = selectTerminalList({
-    rl, items: ['一'], alternateAction: 'play', input, output
+    rl, items: ['一'], alternateAction: 'play', input, output,
+    onFrame: (rows) => { frameRows = rows; }
   });
   setImmediate(() => input.emit('data', Buffer.from(' ')));
   assert.deepEqual(await selection, { index: 0, action: 'play' });
   assert.match(output.chunks.join(''), /空格|请选择/);
+  assert.equal(frameRows.length, output.rows);
+  assert.match(frameRows.join('\n'), /一/);
 });
 
 test('终端列表退出时恢复 raw mode、监听器和终端模式', async () => {
