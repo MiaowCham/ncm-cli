@@ -22,9 +22,9 @@ const NAMESPACE_TYPES = Object.freeze({
   'track-cover': ['Covers', 'song', 'png'],
   'playlist-cover': ['Covers', 'playlist', 'png'],
   'song-music': ['Musics', 'song', 'cache'],
-  'song-lyrics': ['Lyrics', 'song', 'lrc'],
-  'song-lyrics-translated': ['Lyrics', 'song', 'translated.lrc'],
-  'song-lyrics-romanized': ['Lyrics', 'song', 'romanized.lrc'],
+  'song-lyrics': ['Lyrics', 'song', 'lyric.lrc'],
+  'song-lyrics-translated': ['Lyrics', 'song', 'trans.lrc'],
+  'song-lyrics-romanized': ['Lyrics', 'song', 'roman.lrc'],
   'song-metadata': ['Metadata', 'song', 'metadata'],
   'playlist-metadata': ['Metadata', 'playlist', 'metadata'],
   'playlist-tracks-metadata': ['Metadata', 'playlist-tracks', 'metadata'],
@@ -54,6 +54,7 @@ export function dataCachePath(identity, directory = dataCacheDirectory()) {
     // URL-based temporary identities cannot be used as path components.
     id = createHash('sha256').update(String(identity.id ?? '')).digest('hex');
   }
+  if (namespace === 'Lyrics') return path.join(directory, namespace, kind, id, extension);
   return path.join(directory, namespace, kind, `${id}.${extension}`);
 }
 
@@ -98,7 +99,8 @@ async function prune(directory, maxBytes, logger) {
       const file = path.join(current, entry.name);
       if (entry.isDirectory()) await collect(file);
       else if (entry.isFile() && !entry.name.startsWith('.')
-          && /\.(?:png|cache|lrc|metadata)$/.test(entry.name)) {
+          && /\.(?:png|cache)$/.test(entry.name)
+          && ['Covers', 'Musics'].includes(path.relative(directory, file).split(path.sep)[0])) {
         try {
           const info = await stat(file);
           files.push({ file, size: info.size, mtimeMs: info.mtimeMs });
@@ -180,6 +182,7 @@ export async function loadCachedData(identity, {
   legacyFiles = []
 } = {}) {
   if (typeof loader !== 'function') throw new TypeError('缓存 loader 必须是函数');
+  maxBytes = maxBytes == null ? Infinity : maxBytes;
   const key = dataCacheKey(identity);
   const memoryId = scopedKey(directory, key);
   const memoryHit = memory.get(memoryId);

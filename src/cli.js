@@ -534,6 +534,7 @@ async function handleOffset(rl, settings, command, signal, logger) {
 }
 
 function formatBytes(bytes) {
+  if (bytes == null || bytes === Infinity) return '不限制';
   const value = Math.max(0, Number(bytes) || 0);
   if (value < 1024) return `${value} B`;
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
@@ -546,7 +547,7 @@ async function handleCacheSetting(api, settings, command, logger) {
     console.log(`整体缓存上限：${formatBytes(settings.cacheMaxBytes)}`);
     return;
   }
-  const bytes = command.megabytes * 1024 * 1024;
+  const bytes = command.megabytes === 0 ? null : command.megabytes * 1024 * 1024;
   await saveSettings({ ...settings, cacheMaxBytes: bytes });
   settings.cacheMaxBytes = bytes;
   api.setCacheMaxBytes(bytes);
@@ -745,15 +746,17 @@ async function updateLikedPlaylist(api, song, context, operation = 'add') {
 
 async function playSong(api, song, context, rl, cachedLyrics = null, returnPageRows = []) {
   const { signal, logger, authState, shutdown } = context;
-  const result = await api.songUrl(song.id, { signal });
+  let playbackUrl = await cacheSongMusic(song.id, null, {
+    signal, maxBytes: context.settings.cacheMaxBytes, logger
+  });
+  const result = playbackUrl ? { url: playbackUrl } : await api.songUrl(song.id, { signal });
   if (!result?.url) {
     console.log(unavailableUrlMessage(result, authState));
     console.log(`诊断日志：${logger.file}`);
     return cachedLyrics;
   }
   const lyrics = cachedLyrics || await api.lyrics(song.id, { signal });
-  let playbackUrl = result.url;
-  try {
+  if (!playbackUrl) try {
     playbackUrl = await cacheSongMusic(song.id, result.url, {
       signal, maxBytes: context.settings.cacheMaxBytes, logger
     });
@@ -1042,7 +1045,10 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     if (cache.has(index)) return cache.get(index);
     const promise = (async () => {
       const song = tracks[index];
-      const result = await api.songUrl(song.id, { signal: context.signal });
+      let playbackUrl = await cacheSongMusic(song.id, null, {
+        signal: context.signal, maxBytes: context.settings.cacheMaxBytes, logger: context.logger
+      });
+      const result = playbackUrl ? { url: playbackUrl } : await api.songUrl(song.id, { signal: context.signal });
       if (!result?.url) {
         unavailable.add(index);
         void context.logger.warn('playlist_track_unavailable', { songId: song.id, index, code: result?.code });
@@ -1056,8 +1062,7 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
         if (isAbortError(error)) throw error;
         void context.logger.warn('playlist_lyrics_failed', { songId: song.id, error });
       }
-      let playbackUrl = result.url;
-      try {
+      if (!playbackUrl) try {
         playbackUrl = await cacheSongMusic(song.id, result.url, {
           signal: context.signal, maxBytes: context.settings.cacheMaxBytes, logger: context.logger
         });

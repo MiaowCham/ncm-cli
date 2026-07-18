@@ -10,7 +10,7 @@ export const DEFAULT_IMAGE_PROTOCOL = 'auto';
 export const DEFAULT_LYRIC_OFFSET_MS = 0;
 export const DEFAULT_SMTC_OFFSET_MS = 0;
 export const DEFAULT_SEARCH_LIMIT = 30;
-export const DEFAULT_CACHE_MAX_BYTES = 500 * 1024 * 1024;
+export const DEFAULT_CACHE_MAX_BYTES = null;
 export const MAX_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024;
 export const DEFAULT_IMAGE_CACHE_MAX_BYTES = DEFAULT_CACHE_MAX_BYTES;
 export const MAX_IMAGE_CACHE_MAX_BYTES = MAX_CACHE_MAX_BYTES;
@@ -28,7 +28,7 @@ function validSearchLimit(value) {
 }
 
 function validCacheMaxBytes(value) {
-  return Number.isInteger(value) && value >= 0 && value <= MAX_CACHE_MAX_BYTES;
+  return value === null || (Number.isInteger(value) && value >= 0 && value <= MAX_CACHE_MAX_BYTES);
 }
 
 export function settingsFilePath(env = process.env, platform = process.platform) {
@@ -102,7 +102,7 @@ export async function saveSettings(settings, file = settingsFilePath()) {
   if (!PLAYER_BACKENDS.includes(next.playerBackend)) throw new Error(`不支持的播放器后端：${next.playerBackend}`);
   if (!IMAGE_PROTOCOLS.includes(next.imageProtocol)) throw new Error(`不支持的图片协议：${next.imageProtocol}`);
   if (!validCacheMaxBytes(next.cacheMaxBytes)) {
-    throw new Error(`整体缓存大小必须是 0 到 ${MAX_CACHE_MAX_BYTES} 之间的整数`);
+    throw new Error(`整体缓存大小必须是 null 或 0 到 ${MAX_CACHE_MAX_BYTES} 之间的整数`);
   }
   if (!validLyricOffset(next.lyricOffsetMs)) {
     throw new Error(`播放时间偏移量必须是 ${MIN_LYRIC_OFFSET_MS} 到 ${MAX_LYRIC_OFFSET_MS} 之间的整数毫秒`);

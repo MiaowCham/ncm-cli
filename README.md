@@ -218,7 +218,7 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 
 曲目封面和歌单封面保存在同一配置目录下的 `data-cache` 中，路径分别为 `Covers/song/<id>.png` 和 `Covers/playlist/<id>.png`。歌曲音频写入 `Musics/song/<id>.cache`，歌词写入 `Lyrics/song/<id>.lrc`，歌曲、歌单和歌单成员元数据以 JSON 写入 `Metadata/<type>/<id>.metadata`。缓存以资源类型和网易云 ID 作为稳定身份，不依赖临时下载链接。
 
-整体缓存默认上限为 500 MiB。旧配置字段 `imageCacheMaxBytes` 会自动迁移为 `cacheMaxBytes`。`/clrcache` 不带参数时显示各分类大小并提供交互式清理；`other` 包含歌词、元数据和未来新增的非封面、非歌曲缓存。旧版按 URL 命名的 `image-cache` 文件会在能够确认归属时按需迁移。
+封面和歌曲音频缓存默认不限制大小，可通过 `/cache [MB]` 设置上限（`/cache 0` 恢复不限制）。旧配置字段 `imageCacheMaxBytes` 会自动迁移为 `cacheMaxBytes`。歌词、元数据等 `other` 缓存不受该上限影响。`/clrcache` 不带参数时显示各分类大小并提供交互式清理；旧版按 URL 命名的 `image-cache` 文件会在能够确认归属时按需迁移。
 
 - `NCM_API_BASE_URL`：临时覆盖 API 地址
 - `NCM_CLI_CONFIG_DIR`：自定义配置与数据缓存目录
