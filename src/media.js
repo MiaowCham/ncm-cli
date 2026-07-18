@@ -741,6 +741,7 @@ export function planPlaybackVerticalLayout({
   rows,
   coverRows = 0,
   metadataRows = 0,
+  metadataSpacerRows = 0,
   futureLyricRows = 0,
   modeRows = 0,
   shortcutRows = 0,
@@ -752,6 +753,7 @@ export function planPlaybackVerticalLayout({
   const visible = {
     coverRows: Math.max(0, Math.floor(Number(coverRows) || 0)),
     metadataRows: Math.max(0, Math.floor(Number(metadataRows) || 0)),
+    metadataSpacerRows: Math.max(0, Math.floor(Number(metadataSpacerRows) || 0)),
     futureLyricRows: Math.max(0, Math.floor(Number(futureLyricRows) || 0)),
     modeRows: Math.max(0, Math.floor(Number(modeRows) || 0)),
     shortcutRows: Math.max(0, Math.floor(Number(shortcutRows) || 0)),
@@ -760,7 +762,7 @@ export function planPlaybackVerticalLayout({
     progressRows: Math.max(0, Math.floor(Number(progressRows) || 0)),
     compactRequired: false
   };
-  const used = () => visible.coverRows + visible.metadataRows + visible.futureLyricRows
+  const used = () => visible.coverRows + visible.metadataRows + visible.metadataSpacerRows + visible.futureLyricRows
     + visible.modeRows + visible.shortcutRows + visible.statusRows
     + visible.currentLyricRows + visible.progressRows;
   let overflow = Math.max(0, used() - capacity);
@@ -769,13 +771,22 @@ export function planPlaybackVerticalLayout({
     visible[key] -= removed;
     overflow -= removed;
   };
-  removeRows('futureLyricRows');
+  // 先把未来歌词压到两行；歌曲信息仍存在时，其下方留白不可提前挤掉。
+  removeRows('futureLyricRows', Math.max(0, visible.futureLyricRows - 2));
   removeRows('metadataRows', Math.max(0, visible.metadataRows - 1));
+  // 封面可以逐行缩小，但绝不显示低于七行的残缺图像。
+  removeRows('coverRows', Math.max(0, visible.coverRows - 7));
   if (overflow > 0 && visible.coverRows > 0) {
     overflow = Math.max(0, overflow - visible.coverRows);
     visible.coverRows = 0;
   }
-  removeRows('metadataRows');
+  if (overflow > 0 && visible.metadataRows > 0) {
+    const headerRemainder = visible.metadataRows + visible.metadataSpacerRows;
+    overflow = Math.max(0, overflow - headerRemainder);
+    visible.metadataRows = 0;
+    visible.metadataSpacerRows = 0;
+  }
+  removeRows('futureLyricRows');
   if (overflow > 0 && visible.modeRows > 0) {
     overflow = Math.max(0, overflow - visible.modeRows);
     visible.modeRows = 0;
@@ -785,10 +796,6 @@ export function planPlaybackVerticalLayout({
     visible.shortcutRows = 0;
   }
   removeRows('statusRows');
-  if (overflow > 0 && visible.currentLyricRows > 0 && visible.progressRows > 0 && capacity === 1) {
-    visible.compactRequired = true;
-    overflow -= 1;
-  }
   if (overflow > 0) removeRows('currentLyricRows');
   if (overflow > 0) removeRows('progressRows');
   return Object.freeze({ ...visible, capacity, unusedRows: Math.max(0, capacity - (used() - (visible.compactRequired ? 1 : 0))) });
@@ -796,7 +803,7 @@ export function planPlaybackVerticalLayout({
 
 export function playbackCoverRowBudget(rows) {
   const height = Math.max(0, Math.floor(Number(rows) || 0));
-  return height > 1 ? Math.max(2, Math.min(20, Math.floor(height * 0.36))) : 0;
+  return height > 1 ? Math.max(7, Math.min(20, Math.floor(height * 0.36))) : 0;
 }
 
 export function compactPlaybackRequiredRow(currentLyric, progress, columns) {
@@ -819,6 +826,8 @@ export function playbackPrioritizedRows({
   optionalSuffixRows = [],
   availableRows = Infinity,
   columns = 80,
+  paused = false,
+  compactPausedRow = '',
   layout: plannedLayout = null
 } = {}) {
   if (!Number.isFinite(availableRows)) {
@@ -837,14 +846,19 @@ export function playbackPrioritizedRows({
     currentLyricRows: requiredContentRows.length ? 1 : 0,
     progressRows: 1
   });
-  if (layout.compactRequired) {
-    return [compactPlaybackRequiredRow(requiredContentRows[0] || '', progress, columns)];
-  }
-  const prefixCount = Math.min(optionalPrefixRows.length, layout.futureLyricRows);
-  const suffixCount = Math.max(0, layout.futureLyricRows - prefixCount);
+  const visibleRequiredContentRows = paused && layout.metadataRows === 0 && compactPausedRow
+    ? [compactPausedRow]
+    : requiredContentRows;
+  const prefixCount = plannedLayout
+    ? Math.min(optionalPrefixRows.length, layout.metadataSpacerRows ?? 0)
+    : Math.min(optionalPrefixRows.length, layout.futureLyricRows);
+  const suffixCount = Math.min(
+    optionalSuffixRows.length,
+    Math.max(0, layout.futureLyricRows - (plannedLayout ? 0 : prefixCount))
+  );
   const content = [
     ...optionalPrefixRows.slice(0, prefixCount),
-    ...requiredContentRows.slice(0, layout.currentLyricRows),
+    ...visibleRequiredContentRows.slice(0, layout.currentLyricRows),
     ...optionalSuffixRows.slice(0, suffixCount)
   ];
   const visibleControls = [
@@ -888,6 +902,8 @@ function renderDynamic({
   easterEgg = null,
   canFavorite = false,
   favorited = false,
+  compactPausedRow = '',
+  compactPausedArtist = '',
   verticalLayout = null,
   captureOnly = false
 }) {
@@ -969,6 +985,10 @@ function renderDynamic({
     optionalSuffixRows,
     availableRows,
     columns,
+    paused,
+    compactPausedRow: chalk.bold(compactSongArtistText(
+      compactPausedRow, compactPausedArtist || '未知', columns
+    )),
     layout: verticalLayout
   });
   const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
@@ -1029,18 +1049,45 @@ async function renderAnsiBlocks(buffer, maxWidth, maxRows) {
   return rows.join('\n');
 }
 
-function playbackMetadataRows(song, backendLabel, columns) {
-  const artists = Array.isArray(song.artists) ? song.artists.join('/') : song.artist;
-  return [
-    chalk.bold(truncateText(song.name || song.title || '', columns)),
-    truncateText(`歌手：${artists || '未知'}`, columns),
+function songArtistsText(song) {
+  const artists = Array.isArray(song?.artists) ? song.artists.join('/') : song?.artist;
+  return artists || '未知';
+}
+
+function compactSongArtistText(title, artist, columns) {
+  const width = Math.max(1, Math.floor(Number(columns) || 1));
+  const separator = ' - ';
+  const full = `${title}${separator}${artist}`;
+  if (stringWidth(full) <= width || width <= stringWidth(separator) + 2) {
+    return truncateText(full, width);
+  }
+  const contentWidth = width - stringWidth(separator);
+  // 优先完整保留歌名；空间不够时先把歌手压缩到最小标记。
+  const minimumArtistWidth = Math.min(1, stringWidth(artist));
+  const titleWidth = Math.min(stringWidth(title), Math.max(1, contentWidth - minimumArtistWidth));
+  const artistWidth = Math.max(1, contentWidth - titleWidth);
+  return `${truncateText(title, titleWidth)}${separator}${truncateText(artist, artistWidth)}`;
+}
+
+export function playbackMetadataRows(song, backendLabel, columns, visibleRows = Infinity) {
+  const artists = songArtistsText(song);
+  const title = song.name || song.title || '';
+  const rows = [
+    chalk.bold(truncateText(title, columns)),
+    truncateText(`歌手：${artists}`, columns),
     truncateText(`专辑：${song.album || '未知'}`, columns),
     truncateText(`播放器：${backendLabel}`, columns),
     truncateText(`ID：${song.id ?? ''}`, columns)
   ];
+  if (!Number.isFinite(visibleRows)) return rows;
+  const count = Math.max(0, Math.floor(Number(visibleRows) || 0));
+  if (count === 1) {
+    return [chalk.bold(compactSongArtistText(title, artists, columns))];
+  }
+  return rows.slice(0, count);
 }
 
-async function buildTextPlaybackHeaderRows(song, { signal, backendLabel, columns, layout }) {
+async function buildTextPlaybackHeaderRows(song, { signal, columns, layout }) {
   const coverRows = [];
   let coverBuffer = null;
   if (song.cover && layout.coverRows > 0) {
@@ -1051,8 +1098,7 @@ async function buildTextPlaybackHeaderRows(song, { signal, backendLabel, columns
       coverRows.push(...text.split(/\r?\n/));
     } catch { coverBuffer = null; }
   }
-  const metadata = playbackMetadataRows(song, backendLabel, columns);
-  return { coverRows, metadata, coverBuffer };
+  return { coverRows, coverBuffer };
 }
 
 function writeCreditsTransitionRows(entries) {
@@ -1118,7 +1164,9 @@ export async function tryRenderImage(source, {
     const plannedRows = Number.isFinite(Number(maxRows))
       ? Math.max(1, Math.floor(Number(maxRows)))
       : Math.max(1, rows - 8);
-    const height = Math.max(1, Math.min(size === 'playback' ? 20 : 22, Math.floor(rows * 0.36), plannedRows));
+    const height = size === 'playback'
+      ? Math.max(1, Math.min(20, plannedRows))
+      : Math.max(1, Math.min(22, Math.floor(rows * 0.36), plannedRows));
     if (typeof onTextRows === 'function') {
       try {
         const text = await renderAnsiBlocks(buffer, width, height);
@@ -1447,6 +1495,8 @@ export async function playWithProgress({
         : '',
       canFavorite: typeof onFavorite === 'function',
       favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
+      compactPausedRow: activeSong.name || activeSong.title || '',
+      compactPausedArtist: songArtistsText(activeSong),
       verticalLayout: activeVerticalLayout
     };
     const creditsTransitionActive = easterEgg?.phase?.endsWith('-transition');
@@ -1689,6 +1739,7 @@ export async function playWithProgress({
       rows: terminalRows,
       coverRows,
       metadataRows: playbackMetadataRows(songSnapshot, backendLabel, terminalColumns).length,
+      metadataSpacerRows: 1,
       futureLyricRows: terminalRows,
       modeRows: modeRowCount,
       shortcutRows: shortcutRowCount,
@@ -1719,7 +1770,7 @@ export async function playWithProgress({
     }
     const headerRows = [
       ...prepared.coverRows,
-      ...prepared.metadata.slice(0, layout.metadataRows)
+      ...playbackMetadataRows(activeSong, backendLabel, terminalColumns, layout.metadataRows)
     ];
     const elapsedMs = displayPosition(0, activeOffsetMs);
     const dynamicRows = renderDynamic({
@@ -1738,9 +1789,11 @@ export async function playWithProgress({
         : '',
       canFavorite: typeof onFavorite === 'function',
       favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
+      compactPausedRow: activeSong.name || activeSong.title || '',
+      compactPausedArtist: songArtistsText(activeSong),
       dynamicRow: headerRows.length + 1,
       dynamicAnchored: false,
-      currentLyricOnly: false,
+      currentLyricOnly: Boolean(easterEggForSong(activeSong)?.currentLyricOnly),
       easterEgg: null,
       verticalLayout: layout,
       captureOnly: true
@@ -1781,15 +1834,19 @@ export async function playWithProgress({
     if (creditsConfig?.mode === 'credits-csf') {
       creditsPlayerVerticalLayout = verticalLayout;
       creditsTransitionHeaderRows = null;
-      creditsPlayerHeaderRows = playbackMetadataRows(songSnapshot, backendLabel, initialColumns)
-        .slice(0, verticalLayout.metadataRows);
+      creditsPlayerHeaderRows = playbackMetadataRows(
+        songSnapshot, backendLabel, initialColumns, verticalLayout.metadataRows
+      );
       const normalizeCreditsHeader = (prepared) => {
         const layout = prepared.coverRows.length === verticalLayout.coverRows
           ? verticalLayout
           : verticalLayoutFor(songSnapshot, initialRows, initialColumns, prepared.coverRows.length);
         return {
           layout,
-          rows: [...prepared.coverRows, ...prepared.metadata.slice(0, layout.metadataRows)]
+          rows: [
+            ...prepared.coverRows,
+            ...playbackMetadataRows(songSnapshot, backendLabel, initialColumns, layout.metadataRows)
+          ]
         };
       };
       const creditsOrdinaryPlayer = ['player-intro', 'player'].includes(creditsTimeline?.phase);
@@ -1857,15 +1914,10 @@ export async function playWithProgress({
       verticalLayout = verticalLayoutFor(songSnapshot, initialRows, initialColumns, coverRows);
     }
     activeVerticalLayout = verticalLayout;
-    const artists = Array.isArray(songSnapshot.artists) ? songSnapshot.artists.join('/') : songSnapshot.artist;
-    const metadata = [
-      chalk.bold(truncateText(songSnapshot.name || songSnapshot.title || '', initialColumns)),
-      truncateText(`歌手：${artists || '未知'}`, initialColumns),
-      truncateText(`专辑：${songSnapshot.album || '未知'}`, initialColumns),
-      truncateText(`播放器：${backendLabel}`, initialColumns),
-      truncateText(`ID：${songSnapshot.id ?? ''}`, initialColumns)
-    ];
-    for (const line of metadata.slice(0, verticalLayout.metadataRows)) console.log(line);
+    const metadata = playbackMetadataRows(
+      songSnapshot, backendLabel, initialColumns, verticalLayout.metadataRows
+    );
+    for (const line of metadata) console.log(line);
     dynamicRow = Math.min(initialRows, coverRows + Math.min(metadata.length, verticalLayout.metadataRows) + 1);
     process.stdout.write('\x1b[s');
     dynamicAnchored = true;
