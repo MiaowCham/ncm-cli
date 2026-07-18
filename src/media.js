@@ -1024,10 +1024,12 @@ function imageBufferFromDataUri(source) {
   return match ? Buffer.from(match[1], 'base64') : null;
 }
 
-async function loadImage(source, signal, { imageCacheMaxBytes, logger } = {}) {
+async function loadImage(source, signal, { imageCacheMaxBytes, logger, imageIdentity } = {}) {
   const inline = imageBufferFromDataUri(source);
   if (inline) return inline;
-  return loadCachedImage(source, { signal, maxBytes: imageCacheMaxBytes, logger });
+  return loadCachedImage(source, {
+    signal, maxBytes: imageCacheMaxBytes, logger, identity: imageIdentity
+  });
 }
 
 export function isTermuxEnvironment(env = process.env) {
@@ -1130,7 +1132,9 @@ async function buildTextPlaybackHeaderRows(song, {
   if (song.cover && layout.coverRows > 0) {
     try {
       coverBuffer = preloadedBuffer
-        ?? await loadImage(song.cover, signal, { imageCacheMaxBytes, logger });
+        ?? await loadImage(song.cover, signal, {
+          imageCacheMaxBytes, logger, imageIdentity: { type: 'track-cover', id: song.id }
+        });
       const width = Math.max(1, Math.min(52, columns - 2));
       const text = await renderAnsiBlocks(coverBuffer, width, layout.coverRows, {
         compactColor: protocol === 'ansi256'
@@ -1314,7 +1318,7 @@ export async function tryRenderImage(source, {
   signal, size = 'detail', shouldRender, protocol = 'auto', maxRows, onTextRows,
   allowNativeGraphics = false, preloadedBuffer = null, logger = null,
   diagnosticContext = 'unknown', imageCacheMaxBytes,
-  deferLoad = false, onDeferredReady = null
+  deferLoad = false, onDeferredReady = null, imageIdentity = null
 } = {}) {
   const renderStartedAt = Date.now();
   const common = { context: diagnosticContext, size, requestedProtocol: protocol };
@@ -1348,9 +1352,9 @@ export async function tryRenderImage(source, {
   try {
     const immediateBuffer = preloadedBuffer
       ?? imageBufferFromDataUri(source)
-      ?? peekCachedImage(source);
+      ?? peekCachedImage(source, { identity: imageIdentity });
     if (deferLoad && !immediateBuffer && typeof onDeferredReady === 'function') {
-      void loadImage(source, signal, { imageCacheMaxBytes, logger }).then((buffer) => {
+      void loadImage(source, signal, { imageCacheMaxBytes, logger, imageIdentity }).then((buffer) => {
         if (current()) onDeferredReady(buffer);
       }).catch((error) => {
         if (error?.name !== 'AbortError') {
@@ -1362,7 +1366,7 @@ export async function tryRenderImage(source, {
     }
     const loadStartedAt = Date.now();
     const buffer = immediateBuffer
-      ?? await loadImage(source, signal, { imageCacheMaxBytes, logger });
+      ?? await loadImage(source, signal, { imageCacheMaxBytes, logger, imageIdentity });
     mediaLog(logger, 'info', 'image_source_loaded', {
       ...common, durationMs: Date.now() - loadStartedAt, bytes: buffer.length,
       preloaded: Boolean(preloadedBuffer)
@@ -2213,9 +2217,13 @@ export async function playWithProgress({
       };
       const creditsOrdinaryPlayer = ['player-intro', 'player'].includes(creditsTimeline?.phase);
       if (creditsOrdinaryPlayer) {
-        const availableCoverBuffer = preloadedCoverBuffer ?? peekCachedImage(songSnapshot.cover);
+        const imageIdentity = { type: 'track-cover', id: songSnapshot.id };
+        const availableCoverBuffer = preloadedCoverBuffer
+          ?? peekCachedImage(songSnapshot.cover, { identity: imageIdentity });
         if (verticalLayout.coverRows > 0 && !availableCoverBuffer) {
-          void loadImage(songSnapshot.cover, headerSignal, { imageCacheMaxBytes, logger }).then((buffer) => {
+          void loadImage(songSnapshot.cover, headerSignal, {
+            imageCacheMaxBytes, logger, imageIdentity
+          }).then((buffer) => {
             if (!headerSignal.aborted && renderId === headerRenderId && !finished) {
               void drawHeader(null, {
                 preloadedCoverBuffer: buffer,
@@ -2294,6 +2302,7 @@ export async function playWithProgress({
           logger,
           diagnosticContext: 'playback_header',
           imageCacheMaxBytes,
+          imageIdentity: { type: 'track-cover', id: songSnapshot.id },
           deferLoad: true,
           onDeferredReady: (buffer) => {
             if (!headerSignal.aborted && renderId === headerRenderId && !finished
