@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import stringWidth from 'string-width';
 import supportsTerminalGraphics from 'supports-terminal-graphics';
 import { parseLrc } from './lyrics.js';
+import { loadCachedImage, peekCachedImage } from './image-cache.js';
 import { createMpvController } from './mpv-controller.js';
 import { createSmtcBridge } from './smtc.js';
 import { createVlcController } from './vlc-controller.js';
@@ -141,6 +142,7 @@ export function imageProtocolOrder({ preference = 'auto', kitty = false, iterm2 
     // 进程权限或商店安装方式失败，用户选择不应再被自动探测结果否决。
     if (preference === 'sixel') return chafa ? ['sixel', 'ansi'] : ['ansi'];
     if (preference === 'symbols') return chafa ? ['symbols', 'ansi'] : ['ansi'];
+    if (preference === 'ansi256') return ['ansi256'];
     return ['ansi'];
   }
   const order = [];
@@ -301,6 +303,22 @@ export function adjustPlaybackOffset(offsetMs, deltaMs) {
     -60000,
     60000
   );
+}
+
+export function createTrackOffsetSession(configuredOffsetMs = 0) {
+  const configured = adjustPlaybackOffset(configuredOffsetMs, 0);
+  let current = configured;
+  return {
+    get value() { return current; },
+    adjust(deltaMs) {
+      current = adjustPlaybackOffset(current, deltaMs);
+      return current;
+    },
+    reset() {
+      current = configured;
+      return current;
+    }
+  };
 }
 
 export function lyricPosition(elapsedMs, lyricOffsetMs = 0) {
@@ -1001,25 +1019,15 @@ function renderDynamic({
 }
 
 function imageBufferFromDataUri(source) {
+  if (typeof source !== 'string') return null;
   const match = source.match(/^data:image\/[^;,]+;base64,(.+)$/i);
   return match ? Buffer.from(match[1], 'base64') : null;
 }
 
-async function loadImage(source, signal) {
+async function loadImage(source, signal, { imageCacheMaxBytes, logger } = {}) {
   const inline = imageBufferFromDataUri(source);
   if (inline) return inline;
-  const parsed = new URL(source);
-  if (parsed.protocol !== 'https:') throw new Error('只加载 HTTPS 图片');
-  const timeoutSignal = AbortSignal.timeout(10000);
-  const response = await fetch(parsed, { signal: signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal });
-  if (!response.ok) throw new Error(`图片请求失败：HTTP ${response.status}`);
-  const type = response.headers.get('content-type') || '';
-  if (!type.startsWith('image/')) throw new Error('响应不是图片');
-  const declaredSize = Number(response.headers.get('content-length') || 0);
-  if (declaredSize > 5 * 1024 * 1024) throw new Error('图片超过 5 MiB');
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > 5 * 1024 * 1024) throw new Error('图片超过 5 MiB');
-  return buffer;
+  return loadCachedImage(source, { signal, maxBytes: imageCacheMaxBytes, logger });
 }
 
 export function isTermuxEnvironment(env = process.env) {
@@ -1028,10 +1036,10 @@ export function isTermuxEnvironment(env = process.env) {
     || /^termux$/i.test(env.TERM_PROGRAM || ''));
 }
 
-export function ansiImageLimits(maxWidth, maxRows, env = process.env) {
+export function ansiImageLimits(maxWidth, maxRows, compactColor = false) {
   const width = Math.max(1, Math.floor(Number(maxWidth) || 1));
   const rows = Math.max(1, Math.floor(Number(maxRows) || 1));
-  return isTermuxEnvironment(env)
+  return compactColor
     ? { width: Math.min(32, width), rows: Math.min(12, rows), compactColor: true }
     : { width, rows, compactColor: false };
 }
@@ -1041,10 +1049,10 @@ function rgbToAnsi256({ r, g, b }) {
   return 16 + 36 * level(r) + 6 * level(g) + level(b);
 }
 
-async function renderAnsiBlocks(buffer, maxWidth, maxRows) {
+async function renderAnsiBlocks(buffer, maxWidth, maxRows, { compactColor = false } = {}) {
   const { Jimp, intToRGBA } = await import('jimp');
   const image = await Jimp.read(buffer);
-  const limits = ansiImageLimits(maxWidth, maxRows);
+  const limits = ansiImageLimits(maxWidth, maxRows, compactColor);
   const scale = Math.min(limits.width / image.bitmap.width, (limits.rows * 2) / image.bitmap.height);
   const width = Math.max(1, Math.round(image.bitmap.width * scale));
   const pixelHeight = Math.max(2, Math.round(image.bitmap.height * scale));
@@ -1113,14 +1121,20 @@ export function playbackMetadataRows(song, backendLabel, columns, visibleRows = 
   return rows.slice(0, count);
 }
 
-async function buildTextPlaybackHeaderRows(song, { signal, columns, layout }) {
+async function buildTextPlaybackHeaderRows(song, {
+  signal, columns, layout, protocol = 'ansi', imageCacheMaxBytes, logger,
+  preloadedBuffer = null
+}) {
   const coverRows = [];
   let coverBuffer = null;
   if (song.cover && layout.coverRows > 0) {
     try {
-      coverBuffer = await loadImage(song.cover, signal);
+      coverBuffer = preloadedBuffer
+        ?? await loadImage(song.cover, signal, { imageCacheMaxBytes, logger });
       const width = Math.max(1, Math.min(52, columns - 2));
-      const text = await renderAnsiBlocks(coverBuffer, width, layout.coverRows);
+      const text = await renderAnsiBlocks(coverBuffer, width, layout.coverRows, {
+        compactColor: protocol === 'ansi256'
+      });
       coverRows.push(...text.split(/\r?\n/));
     } catch { coverBuffer = null; }
   }
@@ -1299,7 +1313,8 @@ async function tryNativeGraphics(buffer, width, height, protocol) {
 export async function tryRenderImage(source, {
   signal, size = 'detail', shouldRender, protocol = 'auto', maxRows, onTextRows,
   allowNativeGraphics = false, preloadedBuffer = null, logger = null,
-  diagnosticContext = 'unknown'
+  diagnosticContext = 'unknown', imageCacheMaxBytes,
+  deferLoad = false, onDeferredReady = null
 } = {}) {
   const renderStartedAt = Date.now();
   const common = { context: diagnosticContext, size, requestedProtocol: protocol };
@@ -1314,6 +1329,15 @@ export async function tryRenderImage(source, {
   if (protocol === 'none') return finish(0, 'skipped', { reason: 'disabled' });
   const guarded = typeof shouldRender === 'function';
   const current = () => !signal?.aborted && (!guarded || shouldRender());
+  const columns = process.stdout.columns || 80;
+  const rows = process.stdout.rows || 24;
+  const width = Math.max(1, Math.min(size === 'playback' ? 52 : 56, columns - 2));
+  const plannedRows = Number.isFinite(Number(maxRows))
+    ? Math.max(1, Math.floor(Number(maxRows)))
+    : Math.max(1, rows - 8);
+  const height = size === 'playback'
+    ? Math.max(1, Math.min(20, plannedRows))
+    : Math.max(1, Math.min(22, Math.floor(rows * 0.36), plannedRows));
   mediaLog(logger, 'info', 'image_render_started', {
     ...common,
     preloaded: Boolean(preloadedBuffer),
@@ -1322,26 +1346,34 @@ export async function tryRenderImage(source, {
     termux: isTermuxEnvironment()
   });
   try {
+    const immediateBuffer = preloadedBuffer
+      ?? imageBufferFromDataUri(source)
+      ?? peekCachedImage(source);
+    if (deferLoad && !immediateBuffer && typeof onDeferredReady === 'function') {
+      void loadImage(source, signal, { imageCacheMaxBytes, logger }).then((buffer) => {
+        if (current()) onDeferredReady(buffer);
+      }).catch((error) => {
+        if (error?.name !== 'AbortError') {
+          mediaLog(logger, 'warn', 'image_deferred_load_failed', { ...common, error });
+        }
+      });
+      await writeTerminalOutput('\n'.repeat(height));
+      return finish(height, 'deferred', { width, height });
+    }
     const loadStartedAt = Date.now();
-    const buffer = preloadedBuffer ?? await loadImage(source, signal);
+    const buffer = immediateBuffer
+      ?? await loadImage(source, signal, { imageCacheMaxBytes, logger });
     mediaLog(logger, 'info', 'image_source_loaded', {
       ...common, durationMs: Date.now() - loadStartedAt, bytes: buffer.length,
       preloaded: Boolean(preloadedBuffer)
     });
     if (!current()) return finish(0, 'cancelled', { stage: 'source_loaded' });
-    const columns = process.stdout.columns || 80;
-    const rows = process.stdout.rows || 24;
-    const width = Math.max(1, Math.min(size === 'playback' ? 52 : 56, columns - 2));
-    const plannedRows = Number.isFinite(Number(maxRows))
-      ? Math.max(1, Math.floor(Number(maxRows)))
-      : Math.max(1, rows - 8);
-    const height = size === 'playback'
-      ? Math.max(1, Math.min(20, plannedRows))
-      : Math.max(1, Math.min(22, Math.floor(rows * 0.36), plannedRows));
     if (typeof onTextRows === 'function') {
       const snapshotStartedAt = Date.now();
       try {
-        const text = await renderAnsiBlocks(buffer, width, height);
+        const text = await renderAnsiBlocks(buffer, width, height, {
+          compactColor: protocol === 'ansi256'
+        });
         const snapshotRows = text.split(/\r?\n/);
         if (current()) onTextRows(snapshotRows);
         mediaLog(logger, 'info', 'image_text_snapshot_completed', {
@@ -1470,10 +1502,12 @@ export async function tryRenderImage(source, {
         }
       }
 
-      if (selectedProtocol === 'ansi') {
+      if (selectedProtocol === 'ansi' || selectedProtocol === 'ansi256') {
         try {
           const encodeStartedAt = Date.now();
-          const text = await renderAnsiBlocks(buffer, width, height);
+          const text = await renderAnsiBlocks(buffer, width, height, {
+            compactColor: selectedProtocol === 'ansi256'
+          });
           const encodeMs = Date.now() - encodeStartedAt;
           if (!current()) return finish(0, 'cancelled', { stage: 'ansi_encoded' });
           const output = `${text}\n`;
@@ -1514,12 +1548,12 @@ export async function playWithProgress({
   smtcOffsetMs = 0,
   playerBackend = 'auto',
   imageProtocol = 'auto',
+  imageCacheMaxBytes = 100 * 1024 * 1024,
   playlist = { name: '', tracks: [], currentIndex: 0 },
   signal,
   logger,
   rl,
   onInterrupt,
-  onOffsetChange,
   onTrackChange,
   onFavorite,
   returnPageRows = []
@@ -1548,7 +1582,8 @@ export async function playWithProgress({
   let clock = createPlaybackClock(activeDurationMs);
   // 创建 bridge、下载封面等准备工作不应计入真实播放位置。
   clock.pause();
-  let activeOffsetMs = adjustPlaybackOffset(lyricOffsetMs, 0);
+  const trackOffset = createTrackOffsetSession(lyricOffsetMs);
+  let activeOffsetMs = trackOffset.value;
   const activeSmtcOffsetMs = Number.isFinite(Number(smtcOffsetMs)) ? Number(smtcOffsetMs) : 0;
   let volume = 100;
   let userPaused = false;
@@ -2009,13 +2044,6 @@ export async function playWithProgress({
     restartDebounce.schedule({ positionMs, generation: restartGeneration });
   };
 
-  let offsetPersistence = Promise.resolve();
-  const persistOffset = (value) => {
-    offsetPersistence = offsetPersistence
-      .then(() => onOffsetChange?.(value))
-      .catch((error) => { void logger?.warn('playback_offset_save_failed', { error }); });
-  };
-
   const cancelTrackTransition = (reason = '切歌操作已取消') => {
     initialEntryTransitionController?.abort(new DOMException(reason, 'AbortError'));
     trackTransitionController?.abort(new DOMException(reason, 'AbortError'));
@@ -2079,7 +2107,10 @@ export async function playWithProgress({
       signal: transitionSignal,
       backendLabel,
       columns: terminalColumns,
-      layout
+      layout,
+      protocol: imageProtocol,
+      imageCacheMaxBytes,
+      logger
     });
     if (transitionSignal?.aborted) {
       throw transitionSignal.reason ?? new DOMException('切歌转场已取消', 'AbortError');
@@ -2182,9 +2213,26 @@ export async function playWithProgress({
       };
       const creditsOrdinaryPlayer = ['player-intro', 'player'].includes(creditsTimeline?.phase);
       if (creditsOrdinaryPlayer) {
-        const prepared = normalizeCreditsHeader(await buildTextPlaybackHeaderRows(songSnapshot, {
-          signal: headerSignal, backendLabel, columns: initialColumns, layout: verticalLayout
-        }));
+        const availableCoverBuffer = preloadedCoverBuffer ?? peekCachedImage(songSnapshot.cover);
+        if (verticalLayout.coverRows > 0 && !availableCoverBuffer) {
+          void loadImage(songSnapshot.cover, headerSignal, { imageCacheMaxBytes, logger }).then((buffer) => {
+            if (!headerSignal.aborted && renderId === headerRenderId && !finished) {
+              void drawHeader(null, {
+                preloadedCoverBuffer: buffer,
+                reason: 'image_ready'
+              }).catch((error) => mediaLog(logger, 'warn', 'playback_header_failed', { error }));
+            }
+          }).catch((error) => {
+            if (error?.name !== 'AbortError') mediaLog(logger, 'warn', 'image_deferred_load_failed', { error });
+          });
+        }
+        const prepared = normalizeCreditsHeader(verticalLayout.coverRows > 0 && !availableCoverBuffer
+          ? { coverRows: Array.from({ length: verticalLayout.coverRows }, () => ''), coverBuffer: null }
+          : await buildTextPlaybackHeaderRows(songSnapshot, {
+              signal: headerSignal, backendLabel, columns: initialColumns,
+              layout: verticalLayout, protocol: imageProtocol,
+              imageCacheMaxBytes, logger, preloadedBuffer: availableCoverBuffer
+            }));
         if (headerSignal.aborted || renderId !== headerRenderId || finished) return;
         verticalLayout = prepared.layout;
         creditsPlayerVerticalLayout = verticalLayout;
@@ -2207,7 +2255,9 @@ export async function playWithProgress({
       // 两次逐行过渡使用可切分的 ANSI 封面快照；稳定彩蛋阶段将整屏留给 CSF。
       creditsFullPlayerActive = creditsTimeline?.phase === 'egg-transition';
       const prepareCreditsHeader = buildTextPlaybackHeaderRows(songSnapshot, {
-        signal: headerSignal, backendLabel, columns: initialColumns, layout: verticalLayout
+        signal: headerSignal, backendLabel, columns: initialColumns,
+        layout: verticalLayout, protocol: imageProtocol,
+        imageCacheMaxBytes, logger, preloadedBuffer: preloadedCoverBuffer
       });
       if (creditsTimeline?.phase?.endsWith('-transition')) {
         const prepared = normalizeCreditsHeader(await prepareCreditsHeader);
@@ -2243,6 +2293,17 @@ export async function playWithProgress({
           preloadedBuffer: preloadedCoverBuffer,
           logger,
           diagnosticContext: 'playback_header',
+          imageCacheMaxBytes,
+          deferLoad: true,
+          onDeferredReady: (buffer) => {
+            if (!headerSignal.aborted && renderId === headerRenderId && !finished
+                && String(activeSong?.id ?? '') === String(songSnapshot.id ?? '')) {
+              void drawHeader(null, {
+                preloadedCoverBuffer: buffer,
+                reason: 'image_ready'
+              }).catch((error) => mediaLog(logger, 'warn', 'playback_header_failed', { error }));
+            }
+          },
           shouldRender: () => !headerSignal.aborted && renderId === headerRenderId && !finished
         })
       : 0;
@@ -2351,6 +2412,7 @@ export async function playWithProgress({
       ? clamp(next.index, 0, playlistTracks.length - 1)
       : targetIndex;
     activeSong = next.song;
+    activeOffsetMs = trackOffset.reset();
     creditsFullPlayerActive = false;
     creditsPlayerHeaderRows = [];
     creditsTransitionHeaderRows = null;
@@ -2694,12 +2756,8 @@ export async function playWithProgress({
       return;
     }
     if (action.type === 'offset') {
-      const nextOffsetMs = adjustPlaybackOffset(activeOffsetMs, action.deltaMs);
-      if (nextOffsetMs !== activeOffsetMs) {
-        activeOffsetMs = nextOffsetMs;
-        persistOffset(nextOffsetMs);
-      }
-      setIndicator(`播放时间偏移 ${activeOffsetMs} ms`);
+      activeOffsetMs = trackOffset.adjust(action.deltaMs);
+      setIndicator(`当前曲目临时偏移 ${activeOffsetMs} ms`);
       updateSmtc(userPaused ? 'paused' : 'playing');
       render();
       return;
@@ -2838,7 +2896,6 @@ export async function playWithProgress({
     flushRenderDiagnostics('playback_end');
     dynamicWriter?.close();
     try {
-      await offsetPersistence;
       await stopCurrent();
       await persistentController?.close();
       if (!retainSmtc) {

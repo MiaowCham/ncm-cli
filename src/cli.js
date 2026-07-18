@@ -39,7 +39,8 @@ const PLAYER_BACKEND_LABELS = Object.freeze({
 
 const IMAGE_PROTOCOL_LABELS = Object.freeze({
   auto: '自动检测', sixel: 'SIXEL（Windows Terminal 1.22+）', kitty: 'Kitty',
-  iterm2: 'iTerm2', symbols: 'chafa 字符图', ansi: 'ANSI 真彩字符', none: '不显示图片'
+  iterm2: 'iTerm2', symbols: 'chafa 字符图', ansi: 'ANSI 真彩字符',
+  ansi256: 'ANSI 256 色紧凑字符', none: '不显示图片'
 });
 
 function isAbortError(error) {
@@ -225,7 +226,10 @@ export function songDetailMetadataLines(song, platform = process.platform) {
   ];
 }
 
-async function showSong(song, signal, imageProtocol = 'auto', lyrics = null, logger = null) {
+async function showSong(
+  song, signal, imageProtocol = 'auto', lyrics = null, logger = null,
+  imageCacheMaxBytes, pageState = {}
+) {
   console.log();
   let transitionCoverRows = [];
   const coverRows = song.cover
@@ -235,6 +239,10 @@ async function showSong(song, signal, imageProtocol = 'auto', lyrics = null, log
         protocol: imageProtocol,
         logger,
         diagnosticContext: 'song_detail',
+        imageCacheMaxBytes,
+        preloadedBuffer: pageState.preloadedCoverBuffer,
+        deferLoad: true,
+        onDeferredReady: pageState.onImageReady,
         onTextRows: easterEggForSong(song)?.directAnimation
           ? (rows) => { transitionCoverRows = rows; }
           : undefined
@@ -711,12 +719,10 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
+    imageCacheMaxBytes: context.settings.imageCacheMaxBytes,
     signal,
     logger,
     rl,
-    onOffsetChange: (value) => persistPlaybackOffset(
-      context.settings, value, logger, 'playback_hotkey'
-    ),
     onFavorite: authState.loggedIn
       ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
       : undefined,
@@ -751,7 +757,10 @@ async function songMenuInScreen(rl, api, song, context) {
   while (true) {
     const page = await openDetailPage(
       rl,
-      () => showSong(song, signal, context.settings.imageProtocol, cachedLyrics, context.logger),
+      (pageState) => showSong(
+        song, signal, context.settings.imageProtocol, cachedLyrics, context.logger,
+        context.settings.imageCacheMaxBytes, pageState
+      ),
       () => detailFooterPrompt(
         chalk.yellow(songDetailPrompt({ loggedIn: authState.loggedIn, favorited })),
         linksVisible ? songLinks : []
@@ -852,25 +861,38 @@ async function openDetailPage(rl, render, prompt, keys, context) {
   const releaseScreen = tty ? acquireTerminalScreen(output) : () => {};
   if (tty) output.write('\x1b[?25l\x1b[2J\x1b[H');
   let closed = false;
+  let renderGeneration = 0;
   const close = () => {
     if (closed) return;
     closed = true;
+    renderGeneration += 1;
     if (tty) output.write('\x1b[?25h');
     releaseScreen();
   };
   try {
     let transitionBodyRows = [];
     let redrawCount = 0;
-    const redraw = async () => {
+    let promptActive = false;
+    const promptText = typeof prompt === 'function' ? prompt() : prompt;
+    const redraw = async (state = {}) => {
+      const generation = ++renderGeneration;
       const renderStartedAt = Date.now();
-      const reason = redrawCount++ === 0 ? 'initial' : 'resize';
+      const reason = state.reason || (redrawCount++ === 0 ? 'initial' : 'resize');
       void context.logger?.info('detail_render_started', {
         reason, terminalRows: output.rows || 24, terminalColumns: output.columns || 80,
         imageProtocol: context.settings?.imageProtocol
       });
       if (tty) output.write('\x1b[2J\x1b[H');
       try {
-        const renderedRows = await render();
+        const renderedRows = await render({
+          ...state,
+          onImageReady: (preloadedCoverBuffer) => {
+            if (closed || generation !== renderGeneration) return;
+            void redraw({ reason: 'image_ready', preloadedCoverBuffer }).then(() => {
+              if (!closed && promptActive) output.write(promptText);
+            }).catch(() => {});
+          }
+        });
         if (Array.isArray(renderedRows)) transitionBodyRows = renderedRows;
         void context.logger?.info('detail_render_completed', {
           reason, status: 'success', durationMs: Date.now() - renderStartedAt,
@@ -885,8 +907,9 @@ async function openDetailPage(rl, render, prompt, keys, context) {
       }
     };
     await redraw();
-    const promptText = typeof prompt === 'function' ? prompt() : prompt;
+    promptActive = true;
     const action = await readDetailAction(rl, promptText, keys, context, redraw);
+    promptActive = false;
     return {
       action,
       close,
@@ -1021,13 +1044,11 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
+    imageCacheMaxBytes: context.settings.imageCacheMaxBytes,
     playlist: { name: playlist.name, tracks, currentIndex: activeIndex },
     signal: context.signal,
     logger: context.logger,
     rl: context.rl,
-    onOffsetChange: (value) => persistPlaybackOffset(
-      context.settings, value, context.logger, 'playback_hotkey'
-    ),
     onFavorite: context.authState.loggedIn
       ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
       : undefined,
@@ -1081,7 +1102,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
     `歌单链接：${playlistLink(playlist.id || id)}`,
     cover ? `封面链接：${cover}` : '无封面链接'
   ];
-  const renderDetail = async () => {
+  const renderDetail = async (pageState = {}) => {
     console.log();
     let transitionCoverRows = [];
     const coverRows = cover ? await tryRenderImage(cover, {
@@ -1090,6 +1111,10 @@ async function playlistMenuInScreen(rl, api, id, context) {
       protocol: context.settings.imageProtocol,
       logger: context.logger,
       diagnosticContext: 'playlist_detail',
+      imageCacheMaxBytes: context.settings.imageCacheMaxBytes,
+      preloadedBuffer: pageState.preloadedCoverBuffer,
+      deferLoad: true,
+      onDeferredReady: pageState.onImageReady,
       onTextRows: (rows) => { transitionCoverRows = rows; }
     }) : 0;
     const transitionRows = [
