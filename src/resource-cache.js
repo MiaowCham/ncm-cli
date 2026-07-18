@@ -82,7 +82,10 @@ export async function loadCachedLyrics(id, loader, options = {}) {
 }
 
 export async function cacheSongMusic(id, source, options = {}) {
-  if (options.maxBytes === 0) return source;
+  if (options.maxBytes === 0) {
+    void options.logger?.info('song_cache_bypassed', { songId: id, reason: 'disabled' });
+    return source;
+  }
   const localPath = dataCachePath({ type: 'song-music', id }, options.directory);
   void options.logger?.info('song_cache_lookup', { songId: id, path: localPath, sourcePresent: Boolean(source) });
   try {
@@ -92,9 +95,15 @@ export async function cacheSongMusic(id, source, options = {}) {
   } catch (error) {
     void options.logger?.info('song_cache_miss', { songId: id, reason: error.code || 'unavailable' });
   }
-  if (!source) return null;
+  if (!source) {
+    void options.logger?.info('song_cache_bypassed', { songId: id, reason: 'no_source' });
+    return null;
+  }
   const parsed = new URL(source);
-  if (parsed.protocol !== 'https:') return source;
+  if (parsed.protocol !== 'https:') {
+    void options.logger?.info('song_cache_bypassed', { songId: id, reason: 'non_https', protocol: parsed.protocol });
+    return source;
+  }
   const buffer = await loadCachedData({ type: 'song-music', id }, {
     ...options,
     validate: (buffer) => buffer.length > 0,
@@ -111,7 +120,12 @@ export async function cacheSongMusic(id, source, options = {}) {
       return data;
     }
   });
-  if (Number.isFinite(options.maxBytes) && buffer.length > options.maxBytes) return source;
+  if (Number.isFinite(options.maxBytes) && buffer.length > options.maxBytes) {
+    void options.logger?.info('song_cache_bypassed', {
+      songId: id, reason: 'over_limit', bytes: buffer.length, maxBytes: options.maxBytes
+    });
+    return source;
+  }
   void options.logger?.info('song_cache_ready', { songId: id, path: localPath, bytes: buffer.length });
   return localPath;
 }
