@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { adjustPlaybackOffset, attachLyricTranslations, createLatestDebounce, createPlaybackClock, displayPosition, imageProtocolOrder, LOOP_MODES, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackLyricRows, playbackPlaylistModeRows, playbackPlaylistModeText, playbackProgressText, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playerBackendLabel, playerCommandsForBackend, playlistViewport, RANDOM_MODES, rawPosition, resolveCommandExecutable, shouldSyncPlayerPosition, shuffledPlaylistOrder, smtcTimeline, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
+import { adjustPlaybackOffset, attachLyricTranslations, createLatestDebounce, createPlaybackClock, displayPosition, imageProtocolOrder, LOOP_MODES, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, playbackAction, playbackDynamicRows, playbackLyricRows, playbackPlaylistModeRows, playbackPlaylistModeText, playbackProgressSegments, playbackProgressText, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playerBackendLabel, playerCommandsForBackend, playlistViewport, RANDOM_MODES, rawPosition, resolveCommandExecutable, shouldSyncPlayerPosition, shuffledPlaylistOrder, smtcTimeline, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
 import stringWidth from 'string-width';
 
 test('SIXEL 只在已确认支持的终端环境启用', () => {
@@ -28,6 +28,29 @@ test('刷新间隔取下一秒与下一行歌词中的较早者', () => {
   assert.equal(nextRefreshDelay(3500, lines, false, 2000), 300);
   assert.equal(nextRefreshDelay(1000, [], false), 1000);
   assert.equal(nextRefreshDelay(1500, lines, true), 1000);
+  assert.equal(nextRefreshDelay(1500, lines, false, 0, 16), 16);
+});
+
+test('彩蛋动画显示在进度条和播放提示之前', () => {
+  const rows = {
+    progress: '进度条',
+    modeRows: ['随机/循环'],
+    shortcutRows: ['快捷键'],
+    indicatorRow: '状态',
+    contentRows: ['动画 1', '动画 2'],
+    availableRows: 6
+  };
+  assert.deepEqual(playbackDynamicRows({ ...rows, contentBeforeControls: true }), [
+    '动画 1', '动画 2', '进度条', '随机/循环', '快捷键', '状态'
+  ]);
+  assert.deepEqual(playbackDynamicRows(rows), [
+    '进度条', '随机/循环', '快捷键', '状态', '动画 1', '动画 2'
+  ]);
+});
+
+test('彩蛋时间可由普通播放 offset 校准', () => {
+  assert.equal(displayPosition(5000, 2000), 3000);
+  assert.equal(displayPosition(5000, -500), 5500);
 });
 
 test('歌词位置默认延后两秒并支持正负毫秒偏移', () => {
@@ -306,8 +329,21 @@ test('播放器收到终止信号后不会继续等待退出超时', async () =>
 });
 
 test('暂停标记紧邻进度条且窄窗口优先保留', () => {
-  assert.equal(playbackProgressText({ bar: '=>', timeText: '00:12 / 03:45', paused: true, columns: 80 }), '[=>] [已暂停] 00:12 / 03:45');
-  assert.equal(playbackProgressText({ bar: '>', timeText: '00:12 / 03:45', paused: true, columns: 12 }), '[>] [已暂停]');
+  assert.equal(playbackProgressText({ bar: '=>', timeText: '00:12 / 03:45', paused: true, columns: 80 }), '=> [已暂停] 00:12 / 03:45');
+  assert.equal(playbackProgressText({ bar: '>', timeText: '00:12 / 03:45', paused: true, columns: 12 }), '> [已暂停]');
+});
+
+test('进度条使用整块、八分之一细分块和背景色未播放槽', () => {
+  assert.deepEqual(playbackProgressSegments(0, 4), {
+    played: '', partial: '', unplayed: '    '
+  });
+  assert.deepEqual(playbackProgressSegments(0.30, 4), {
+    played: '█', partial: '▎', unplayed: '  '
+  });
+  assert.deepEqual(playbackProgressSegments(1, 4), {
+    played: '████', partial: '', unplayed: ''
+  });
+  assert.equal(stringWidth(Object.values(playbackProgressSegments(0.30, 4)).join('')), 4);
 });
 
 test('mpv 时间位置仅在明显偏离本地时钟时触发同步', () => {

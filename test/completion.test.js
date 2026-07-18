@@ -8,6 +8,8 @@ test('斜杠命令可按前缀补全', () => {
   assert.deepEqual(commandCompleter('/idly'), [['/idlyric'], '/idly']);
   assert.deepEqual(commandCompleter('/qu'), [['/quality', '/quit'], '/qu']);
   assert.deepEqual(commandCompleter('/cle'), [['/clear'], '/cle']);
+  assert.equal(SLASH_COMMANDS.includes('/smtcoffset'), false);
+  assert.deepEqual(commandCompleter('/smtc'), [[], '/smtc']);
 });
 
 test('命令补全不干扰普通搜索和未知命令', () => {

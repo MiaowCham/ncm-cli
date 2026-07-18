@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeCookie, normalizeSong, parseIdCommand, parseLoginCommand,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand, parseNumberSelection,
-  parseListPlaylistsCommand, parseOffsetCommand, parseSmtcOffsetCommand, parsePlaylistCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand,
+  parseListPlaylistsCommand, parseOffsetCommand, parsePlaylistCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand,
   parseSignoutCommand, parseClearCommand, parseApiCommand
 } from '../src/parsers.js';
 
@@ -75,16 +75,6 @@ test('识别歌词偏移命令并报告非法参数', () => {
   assert.equal(parseOffsetCommand('offset 2000'), null);
 });
 
-test('识别 SMTC 额外偏移命令并报告非法参数', () => {
-  assert.deepEqual(parseSmtcOffsetCommand('/smtcoffset'), { milliseconds: null });
-  assert.deepEqual(parseSmtcOffsetCommand('/SMTCOFFSET +150'), { milliseconds: 150 });
-  assert.deepEqual(parseSmtcOffsetCommand('/smtcoffset -300'), { milliseconds: -300 });
-  assert.deepEqual(parseSmtcOffsetCommand('/smtcoffset 1.5'), {
-    milliseconds: null,
-    error: 'SMTC 额外偏移量必须是整数毫秒'
-  });
-  assert.equal(parseSmtcOffsetCommand('smtcoffset 100'), null);
-});
 
 test('识别 API 地址命令', () => {
   assert.deepEqual(parseApiCommand('/api'), { url: null });

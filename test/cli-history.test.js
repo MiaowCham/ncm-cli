@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ask, detailFooterPrompt, detailOverlaySequence, playlistPlaybackDestination, playlistPreviewLimit, songDetailPrompt, songLyricPreview, songLyricPreviewRemaining } from '../src/cli.js';
+import { ask, detailFooterPrompt, detailOverlaySequence, playlistPlaybackDestination, playlistPreviewLimit, songDetailFooterLines, songDetailPrompt, songLyricPreview, songLyricPreviewRemaining } from '../src/cli.js';
 
 function fakeReadline(history, answer = '子界面输入', error = null) {
   return {
@@ -51,6 +51,14 @@ test('歌曲详情只为登录用户显示可切换的收藏按钮', () => {
   assert.equal(songDetailPrompt().includes('收藏'), false);
   assert.match(songDetailPrompt({ loggedIn: true }), /\[f\]收藏/);
   assert.match(songDetailPrompt({ loggedIn: true, favorited: true }), /\[f\]取消收藏/);
+});
+
+test('Credits EX 歌曲详情显示推荐字体并保留链接行', () => {
+  assert.deepEqual(songDetailFooterLines({ id: 1 }, ['播放链接']), ['播放链接']);
+  assert.deepEqual(songDetailFooterLines({ id: 405372425 }, ['播放链接']), [
+    '推荐使用字体：NCM Credits VGA16（见 assets/fonts）',
+    '播放链接'
+  ]);
 });
 
 test('主页输入保留在 readline 历史', async () => {
