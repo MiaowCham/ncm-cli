@@ -32,6 +32,8 @@ dotnet run --project .\NcmCli.SmtcBridge.csproj -- --integration-test
 .\build.ps1 -Configuration Release -Runtime win-x64 -SelfContained
 ```
 
+发布成功后，构建脚本只保留 `publish/<runtime>/ncm-cli-smtc-bridge.exe`，并自动删除 `bin`、`obj` 和其他临时发布产物。
+
 The integration test registers a uniquely named SMTC session, then queries it
 through `GlobalSystemMediaTransportControlsSessionManager` and verifies the
 round-trip metadata, playback state, position, duration, and real Windows

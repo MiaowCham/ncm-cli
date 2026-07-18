@@ -1,4 +1,6 @@
 import { normalizeSong } from './parsers.js';
+import { removeCachedData } from './data-cache.js';
+import { loadCachedJson, loadCachedLyrics, readCachedJson } from './resource-cache.js';
 
 export function normalizeApiBaseUrl(value) {
   if (typeof value !== 'string' || !value.trim()) throw new Error('API 地址不能为空');
@@ -52,12 +54,13 @@ function isLikedPlaylist(playlist) {
 }
 
 export class NcmApi {
-  constructor({ baseUrl, cookie = null, logger = null, quality = 'standard' } = {}) {
+  constructor({ baseUrl, cookie = null, logger = null, quality = 'standard', cacheMaxBytes = 0 } = {}) {
     if (!baseUrl) throw new Error('尚未配置 API 地址，请先设置兼容 api-enhanced 的服务地址');
     this.baseUrl = normalizeApiBaseUrl(baseUrl);
     this.cookie = cookie;
     this.logger = logger;
     this.quality = quality;
+    this.cacheMaxBytes = cacheMaxBytes;
   }
 
   setCookie(cookie) {
@@ -70,6 +73,14 @@ export class NcmApi {
 
   setQuality(quality) {
     this.quality = quality;
+  }
+
+  setCacheMaxBytes(cacheMaxBytes) {
+    this.cacheMaxBytes = cacheMaxBytes;
+  }
+
+  cacheOptions(options = {}) {
+    return { signal: options.signal, maxBytes: this.cacheMaxBytes, logger: this.logger };
   }
 
   async request(endpoint, params = {}, { timeoutMs = 20000, signal } = {}) {
@@ -131,10 +142,12 @@ export class NcmApi {
   }
 
   async songDetail(id, options = {}) {
-    const { data } = await this.request('/song/detail', { ids: id }, options);
-    const raw = data.songs?.[0];
-    if (!raw) throw new Error(`没有找到歌曲 ID ${id}`);
-    return normalizeSong(raw);
+    return loadCachedJson({ type: 'song-metadata', id }, async () => {
+      const { data } = await this.request('/song/detail', { ids: id }, options);
+      const raw = data.songs?.[0];
+      if (!raw) throw new Error(`没有找到歌曲 ID ${id}`);
+      return normalizeSong(raw);
+    }, this.cacheOptions(options));
   }
 
   async userPlaylists(uid, options = {}) {
@@ -145,6 +158,7 @@ export class NcmApi {
     } = options;
     const pageSize = Math.max(1, Math.min(1000, Math.trunc(Number(requestedPageSize)) || 1000));
     const maxPlaylists = Math.max(1, Math.min(10000, Math.trunc(Number(requestedMaxPlaylists)) || 10000));
+    return loadCachedJson({ type: 'user-playlists-metadata', id: uid }, async () => {
     const playlists = [];
     const seenIds = new Set();
     let offset = 0;
@@ -171,12 +185,15 @@ export class NcmApi {
       ...playlists.filter(isLikedPlaylist),
       ...playlists.filter((playlist) => !isLikedPlaylist(playlist))
     ];
+    }, { ...this.cacheOptions(options), ttlMs: 5 * 60 * 1000 });
   }
 
   async playlistDetail(id, options = {}) {
-    const { data } = await this.request('/playlist/detail', { id }, options);
-    if (!data.playlist) throw new Error(`没有找到歌单 ID ${id}`);
-    return normalizePlaylist(data.playlist);
+    return loadCachedJson({ type: 'playlist-metadata', id }, async () => {
+      const { data } = await this.request('/playlist/detail', { id }, options);
+      if (!data.playlist) throw new Error(`没有找到歌单 ID ${id}`);
+      return normalizePlaylist(data.playlist);
+    }, { ...this.cacheOptions(options), ttlMs: 10 * 60 * 1000 });
   }
 
   async playlistTracks(id, options = {}) {
@@ -187,6 +204,7 @@ export class NcmApi {
     } = options;
     const pageSize = Math.max(1, Math.min(1000, Math.trunc(Number(requestedPageSize)) || 500));
     const maxTracks = Math.max(1, Math.min(10000, Math.trunc(Number(requestedMaxTracks)) || 10000));
+    return loadCachedJson({ type: 'playlist-tracks-metadata', id }, async () => {
     const tracks = [];
     const seenIds = new Set();
 
@@ -206,15 +224,17 @@ export class NcmApi {
       if (page.length < limit || added === 0 || tracks.length >= maxTracks) break;
     }
     return tracks;
+    }, { ...this.cacheOptions(options), ttlMs: 5 * 60 * 1000 });
   }
 
   async lyrics(id, options = {}) {
-    const { data } = await this.request('/lyric', { id }, options);
-    return {
-      original: data.lrc?.lyric || '',
-      translated: data.tlyric?.lyric || '',
-      romanized: data.romalrc?.lyric || ''
-    };
+    return loadCachedLyrics(id, async () => {
+      const { data } = await this.request('/lyric', { id }, options);
+      return {
+        original: data.lrc?.lyric || '', translated: data.tlyric?.lyric || '',
+        romanized: data.romalrc?.lyric || ''
+      };
+    }, this.cacheOptions(options));
   }
 
   async updatePlaylistTracks(playlistId, songIds, operation = 'add', options = {}) {
@@ -232,7 +252,23 @@ export class NcmApi {
       const action = operation === 'del' ? '从歌单删除歌曲' : '添加歌曲至歌单';
       throw new Error(message || `${action}失败（code=${payload?.code ?? 'unknown'}）`);
     }
+    if (this.cacheMaxBytes > 0) {
+      await Promise.all([
+        removeCachedData({ type: 'playlist-metadata', id: playlistId }),
+        removeCachedData({ type: 'playlist-tracks-metadata', id: playlistId })
+      ]);
+    }
     return { code, playlistId: String(playlistId), tracks, alreadyPresent };
+  }
+
+  async isSongLiked(uid, songId, options = {}) {
+    const playlists = await readCachedJson({ type: 'user-playlists-metadata', id: uid });
+    if (!Array.isArray(playlists)) return false;
+    const liked = playlists.find(isLikedPlaylist);
+    if (!liked) return false;
+    const tracks = await readCachedJson({ type: 'playlist-tracks-metadata', id: liked.id });
+    if (!Array.isArray(tracks)) return false;
+    return tracks.some((song) => String(song.id) === String(songId));
   }
 
   async addPlaylistTracks(playlistId, songIds, options = {}) {

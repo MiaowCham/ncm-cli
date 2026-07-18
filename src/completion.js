@@ -14,6 +14,8 @@ export const SLASH_COMMANDS = Object.freeze([
   '/offset',
   '/api',
   '/clear',
+  '/cache',
+  '/clrcache',
   '/help',
   '/quit'
 ]);
@@ -32,6 +34,8 @@ export const COMMAND_DESCRIPTIONS = Object.freeze({
   '/offset': '查看或设置播放偏移',
   '/api': '查看或更换 API 地址',
   '/clear': '清屏',
+  '/cache': '查看或设置整体缓存大小',
+  '/clrcache': '查看或清理本地缓存',
   '/help': '显示帮助',
   '/quit': '退出程序'
 });
@@ -92,6 +96,9 @@ export function commandCompleter(input) {
   }
   if (command === '/login') {
     return completeValues(line, prefix, argument, ['status']);
+  }
+  if (command === '/clrcache') {
+    return completeValues(line, prefix, argument, ['covers', 'musics', 'other']);
   }
   if (command === '/idlyric' || command === '/lyric') {
     return completeLyricFormat(line, `${leading}${typedCommand}`, separator, argument);
