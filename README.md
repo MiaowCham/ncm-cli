@@ -236,10 +236,12 @@ npm run test:live
 
 日志采用脱敏 JSONL，不记录 Cookie、二维码数据、搜索词、歌词正文或完整媒体 URL。
 
-- Windows：`%LOCALAPPDATA%\ncm-cli\logs\ncm-cli.log`
-- 其他系统：用户配置目录下的 `ncm-cli/logs/ncm-cli.log`
+- Windows：`%LOCALAPPDATA%\ncm-cli\logs\last.log`
+- 其他系统：用户配置目录下的 `ncm-cli/logs/last.log`
 
-日志按 `1 MiB × 5` 轮转。
+`last.log` 只包含当前这次运行的实时日志。下次启动时，旧日志会按时间改名保存；超过一天的历史日志会自动删除。
+
+单次运行中的日志达到 `1 MiB` 时也会按时间分段，避免 `last.log` 无限制增长。
 
 ## 安全说明
 

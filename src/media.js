@@ -1127,14 +1127,14 @@ async function buildTextPlaybackHeaderRows(song, { signal, columns, layout }) {
   return { coverRows, coverBuffer };
 }
 
-function writeCreditsTransitionRows(entries) {
+function writeCreditsTransitionRows(entries, writeOutput = (output) => process.stdout.write(output)) {
   const output = entries.map(({ state, text }) => {
     const rendered = state === 'flash-target'
       ? chalk.inverse(chalk.whiteBright(text))
       : state === 'target-preview' ? chalk.whiteBright(text) : text;
     return `${rendered}\x1b[0m\x1b[K`;
   }).join('\n');
-  process.stdout.write(`\x1b[H${output}`);
+  writeOutput(`\x1b[H${output}`);
 
 }
 
@@ -1160,6 +1160,10 @@ function writeTerminalOutput(output) {
   });
 }
 
+function mediaLog(logger, level, event, data = {}) {
+  try { void logger?.[level]?.(event, data); } catch {}
+}
+
 export function sixelCursorBox(output, height) {
   const rows = Math.max(1, Math.floor(Number(height) || 1));
   const payload = Buffer.isBuffer(output) ? output : Buffer.from(output);
@@ -1170,11 +1174,55 @@ export function sixelCursorBox(output, height) {
   ]);
 }
 
-export function createLatestTerminalWriter(stream) {
+export function createLatestTerminalWriter(stream, {
+  onDiagnostic = () => {},
+  now = Date.now,
+  diagnosticThresholdMs = 250
+} = {}) {
   let writing = false;
   let waitingDrain = false;
   let pending = null;
   let closed = false;
+  let episode = null;
+  const totals = {
+    writeCount: 0,
+    outputBytes: 0,
+    queuedFrames: 0,
+    droppedFrames: 0,
+    backpressureCount: 0,
+    maxFrameBytes: 0,
+    maxBlockedDurationMs: 0
+  };
+
+  const notify = (diagnostic) => {
+    try { onDiagnostic(diagnostic); } catch {}
+  };
+  const frameBytes = (output) => Buffer.isBuffer(output)
+    ? output.length
+    : Buffer.byteLength(String(output));
+  const beginEpisode = (reason, bytes) => {
+    if (!episode) {
+      episode = {
+        startedAt: now(), reason, queuedFrames: 0, droppedFrames: 0,
+        maxFrameBytes: bytes
+      };
+    } else {
+      episode.maxFrameBytes = Math.max(episode.maxFrameBytes, bytes);
+    }
+  };
+  const completeEpisode = (closedWhileBlocked = false) => {
+    if (!episode || (!closedWhileBlocked && (writing || waitingDrain || pending !== null))) return;
+    const durationMs = Math.max(0, now() - episode.startedAt);
+    totals.maxBlockedDurationMs = Math.max(totals.maxBlockedDurationMs, durationMs);
+    if (durationMs >= diagnosticThresholdMs || episode.droppedFrames > 0) {
+      notify({
+        type: 'backpressure', durationMs, reason: episode.reason,
+        queuedFrames: episode.queuedFrames, droppedFrames: episode.droppedFrames,
+        maxFrameBytes: episode.maxFrameBytes, closedWhileBlocked
+      });
+    }
+    episode = null;
+  };
 
   const flushPending = () => {
     if (closed || writing || waitingDrain || pending === null) return;
@@ -1185,20 +1233,35 @@ export function createLatestTerminalWriter(stream) {
   const onDrain = () => {
     waitingDrain = false;
     flushPending();
+    completeEpisode();
   };
   const onWritten = () => {
     writing = false;
     flushPending();
+    completeEpisode();
   };
   const write = (output) => {
     if (closed) return false;
+    const bytes = frameBytes(output);
+    totals.maxFrameBytes = Math.max(totals.maxFrameBytes, bytes);
     if (writing || waitingDrain) {
+      beginEpisode(waitingDrain ? 'stdout_backpressure' : 'write_in_flight', bytes);
+      totals.queuedFrames += 1;
+      episode.queuedFrames += 1;
+      if (pending !== null) {
+        totals.droppedFrames += 1;
+        episode.droppedFrames += 1;
+      }
       pending = output;
       return false;
     }
     writing = true;
+    totals.writeCount += 1;
+    totals.outputBytes += bytes;
     const accepted = stream.write(output, onWritten);
     if (!accepted) {
+      beginEpisode('stdout_backpressure', bytes);
+      totals.backpressureCount += 1;
       waitingDrain = true;
       stream.once('drain', onDrain);
     }
@@ -1211,6 +1274,8 @@ export function createLatestTerminalWriter(stream) {
       closed = true;
       pending = null;
       stream.removeListener('drain', onDrain);
+      completeEpisode(true);
+      notify({ type: 'summary', ...totals });
     },
     get blocked() { return writing || waitingDrain; }
   });
@@ -1233,14 +1298,37 @@ async function tryNativeGraphics(buffer, width, height, protocol) {
 
 export async function tryRenderImage(source, {
   signal, size = 'detail', shouldRender, protocol = 'auto', maxRows, onTextRows,
-  allowNativeGraphics = false, preloadedBuffer = null
+  allowNativeGraphics = false, preloadedBuffer = null, logger = null,
+  diagnosticContext = 'unknown'
 } = {}) {
-  if ((!source && !preloadedBuffer) || !process.stdout.isTTY || protocol === 'none') return 0;
+  const renderStartedAt = Date.now();
+  const common = { context: diagnosticContext, size, requestedProtocol: protocol };
+  const finish = (resultRows, status, data = {}) => {
+    mediaLog(logger, 'info', 'image_render_completed', {
+      ...common, status, resultRows, durationMs: Date.now() - renderStartedAt, ...data
+    });
+    return resultRows;
+  };
+  if (!source && !preloadedBuffer) return finish(0, 'skipped', { reason: 'no_source' });
+  if (!process.stdout.isTTY) return finish(0, 'skipped', { reason: 'not_tty' });
+  if (protocol === 'none') return finish(0, 'skipped', { reason: 'disabled' });
   const guarded = typeof shouldRender === 'function';
   const current = () => !signal?.aborted && (!guarded || shouldRender());
+  mediaLog(logger, 'info', 'image_render_started', {
+    ...common,
+    preloaded: Boolean(preloadedBuffer),
+    terminalRows: process.stdout.rows || 24,
+    terminalColumns: process.stdout.columns || 80,
+    termux: isTermuxEnvironment()
+  });
   try {
+    const loadStartedAt = Date.now();
     const buffer = preloadedBuffer ?? await loadImage(source, signal);
-    if (!current()) return 0;
+    mediaLog(logger, 'info', 'image_source_loaded', {
+      ...common, durationMs: Date.now() - loadStartedAt, bytes: buffer.length,
+      preloaded: Boolean(preloadedBuffer)
+    });
+    if (!current()) return finish(0, 'cancelled', { stage: 'source_loaded' });
     const columns = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
     const width = Math.max(1, Math.min(size === 'playback' ? 52 : 56, columns - 2));
@@ -1251,10 +1339,21 @@ export async function tryRenderImage(source, {
       ? Math.max(1, Math.min(20, plannedRows))
       : Math.max(1, Math.min(22, Math.floor(rows * 0.36), plannedRows));
     if (typeof onTextRows === 'function') {
+      const snapshotStartedAt = Date.now();
       try {
         const text = await renderAnsiBlocks(buffer, width, height);
-        if (current()) onTextRows(text.split(/\r?\n/));
-      } catch {}
+        const snapshotRows = text.split(/\r?\n/);
+        if (current()) onTextRows(snapshotRows);
+        mediaLog(logger, 'info', 'image_text_snapshot_completed', {
+          ...common, status: current() ? 'success' : 'cancelled',
+          durationMs: Date.now() - snapshotStartedAt,
+          outputBytes: Buffer.byteLength(text), resultRows: snapshotRows.length
+        });
+      } catch (error) {
+        mediaLog(logger, 'warn', 'image_text_snapshot_completed', {
+          ...common, status: 'failed', durationMs: Date.now() - snapshotStartedAt, error
+        });
+      }
     }
     const hasChafa = commandExists('chafa');
     const protocols = imageProtocolOrder({
@@ -1265,64 +1364,143 @@ export async function tryRenderImage(source, {
       chafa: hasChafa
     });
 
-    for (const protocol of protocols) {
-      if (!current()) return 0;
-      if (protocol === 'kitty' || protocol === 'iterm2') {
+    mediaLog(logger, 'info', 'image_protocol_candidates', { ...common, protocols, width, height });
+
+    for (const selectedProtocol of protocols) {
+      if (!current()) return finish(0, 'cancelled', { stage: 'protocol_selection' });
+      const attemptStartedAt = Date.now();
+      if (selectedProtocol === 'kitty' || selectedProtocol === 'iterm2') {
         // terminal-image 的 Kitty 路径可能在 Promise 返回前直接写 stdout，
         // 无法为连续切歌做 generation 校验；可取消的后台封面任务跳过该路径。
-        if (guarded && !allowNativeGraphics) continue;
+        if (guarded && !allowNativeGraphics) {
+          mediaLog(logger, 'info', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'skipped', reason: 'guarded_native_graphics',
+            durationMs: Date.now() - attemptStartedAt
+          });
+          continue;
+        }
         try {
-          if (await tryNativeGraphics(buffer, width, height, protocol)) return height;
-        } catch {}
+          const success = await tryNativeGraphics(buffer, width, height, selectedProtocol);
+          mediaLog(logger, 'info', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: success ? 'success' : 'unsupported',
+            durationMs: Date.now() - attemptStartedAt, resultRows: success ? height : 0
+          });
+          if (success) return finish(height, 'success', { selectedProtocol, width, height });
+        } catch (error) {
+          mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'failed',
+            durationMs: Date.now() - attemptStartedAt, error
+          });
+        }
       }
 
-      if (protocol === 'sixel') {
+      if (selectedProtocol === 'sixel') {
         try {
+          const encodeStartedAt = Date.now();
           const rendered = spawnSync('chafa', ['--format=sixels', `--size=${width}x${height}`, '-'], {
             input: buffer,
             windowsHide: true,
             maxBuffer: 4 * 1024 * 1024
           });
+          const encodeMs = Date.now() - encodeStartedAt;
           if (rendered.status === 0 && rendered.stdout?.includes(Buffer.from('\x1bP'))) {
-            if (!current()) return 0;
+            if (!current()) return finish(0, 'cancelled', { stage: 'sixel_encoded' });
             // chafa 1.14 等版本只输出 SIXEL DCS，且各终端在 DCS 结束后的
             // 光标位置并不一致。恢复到图片起点后按布局高度显式定位，确保
             // 详情页、播放器的行预算与真实文本光标始终一致。
-            await writeTerminalOutput(sixelCursorBox(rendered.stdout, height));
-            return height;
+            const output = sixelCursorBox(rendered.stdout, height);
+            const writeStartedAt = Date.now();
+            await writeTerminalOutput(output);
+            const writeMs = Date.now() - writeStartedAt;
+            mediaLog(logger, 'info', 'image_protocol_attempt_completed', {
+              ...common, selectedProtocol, status: 'success', encodeMs, writeMs,
+              durationMs: Date.now() - attemptStartedAt, outputBytes: output.length,
+              resultRows: height
+            });
+            return finish(height, 'success', { selectedProtocol, width, height, encodeMs, writeMs });
           }
-        } catch {}
+          mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'failed', encodeMs,
+            durationMs: Date.now() - attemptStartedAt, exitStatus: rendered.status,
+            outputBytes: rendered.stdout?.length || 0
+          });
+        } catch (error) {
+          mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'failed',
+            durationMs: Date.now() - attemptStartedAt, error
+          });
+        }
       }
 
-      if (protocol === 'symbols') {
+      if (selectedProtocol === 'symbols') {
         try {
+          const encodeStartedAt = Date.now();
           const rendered = spawnSync('chafa', ['--format=symbols', `--size=${width}x${height}`, '-'], {
             input: buffer,
             encoding: 'utf8',
             windowsHide: true,
             maxBuffer: 2 * 1024 * 1024
           });
+          const encodeMs = Date.now() - encodeStartedAt;
           if (rendered.status === 0 && rendered.stdout?.trim()) {
             const text = rendered.stdout.replace(/\s+$/, '');
-            if (!current()) return 0;
-            await writeTerminalOutput(`${text}\n`);
-            return text.split(/\r?\n/).length;
+            if (!current()) return finish(0, 'cancelled', { stage: 'symbols_encoded' });
+            const output = `${text}\n`;
+            const writeStartedAt = Date.now();
+            await writeTerminalOutput(output);
+            const writeMs = Date.now() - writeStartedAt;
+            const resultRows = text.split(/\r?\n/).length;
+            mediaLog(logger, 'info', 'image_protocol_attempt_completed', {
+              ...common, selectedProtocol, status: 'success', encodeMs, writeMs,
+              durationMs: Date.now() - attemptStartedAt,
+              outputBytes: Buffer.byteLength(output), resultRows
+            });
+            return finish(resultRows, 'success', { selectedProtocol, width, height, encodeMs, writeMs });
           }
-        } catch {}
+          mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'failed', encodeMs,
+            durationMs: Date.now() - attemptStartedAt, exitStatus: rendered.status,
+            outputBytes: Buffer.byteLength(rendered.stdout || '')
+          });
+        } catch (error) {
+          mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'failed',
+            durationMs: Date.now() - attemptStartedAt, error
+          });
+        }
       }
 
-      if (protocol === 'ansi') {
+      if (selectedProtocol === 'ansi') {
         try {
+          const encodeStartedAt = Date.now();
           const text = await renderAnsiBlocks(buffer, width, height);
-          if (!current()) return 0;
-          await writeTerminalOutput(`${text}\n`);
-          return text.split(/\r?\n/).length;
-        } catch {}
+          const encodeMs = Date.now() - encodeStartedAt;
+          if (!current()) return finish(0, 'cancelled', { stage: 'ansi_encoded' });
+          const output = `${text}\n`;
+          const writeStartedAt = Date.now();
+          await writeTerminalOutput(output);
+          const writeMs = Date.now() - writeStartedAt;
+          const resultRows = text.split(/\r?\n/).length;
+          mediaLog(logger, 'info', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'success', encodeMs, writeMs,
+            durationMs: Date.now() - attemptStartedAt,
+            outputBytes: Buffer.byteLength(output), resultRows
+          });
+          return finish(resultRows, 'success', { selectedProtocol, width, height, encodeMs, writeMs });
+        } catch (error) {
+          mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
+            ...common, selectedProtocol, status: 'failed',
+            durationMs: Date.now() - attemptStartedAt, error
+          });
+        }
       }
     }
-    return 0;
-  } catch {
-    return 0;
+    return finish(0, 'unsupported', { protocols, width, height });
+  } catch (error) {
+    mediaLog(logger, 'warn', 'image_render_failed', {
+      ...common, durationMs: Date.now() - renderStartedAt, error
+    });
+    return finish(0, signal?.aborted ? 'cancelled' : 'failed');
   }
 }
 
@@ -1351,7 +1529,18 @@ export async function playWithProgress({
   let player = findPlayer(playerCommandsForBackend(playerBackend));
   if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
-  const dynamicWriter = tty ? createLatestTerminalWriter(process.stdout) : null;
+  const dynamicWriter = tty ? createLatestTerminalWriter(process.stdout, {
+    onDiagnostic: ({ type, ...diagnostic }) => mediaLog(
+      logger,
+      type === 'backpressure' ? 'warn' : 'info',
+      type === 'backpressure' ? 'terminal_writer_backpressure' : 'terminal_writer_summary',
+      {
+        ...diagnostic,
+        terminalRows: process.stdout.rows || 24,
+        terminalColumns: process.stdout.columns || 80
+      }
+    )
+  }) : null;
   let activeSong = song;
   let activeUrl = url;
   let activeDurationMs = durationMs;
@@ -1546,8 +1735,43 @@ export async function playWithProgress({
     ).phase.endsWith('-transition')
   );
 
+  let renderDiagnostics = {
+    startedAt: performance.now(), count: 0, totalDurationMs: 0, maxDurationMs: 0,
+    lastPhase: 'normal'
+  };
+  const flushRenderDiagnostics = (reason = 'interval') => {
+    if (!renderDiagnostics.count) return;
+    const windowMs = Math.max(0, performance.now() - renderDiagnostics.startedAt);
+    mediaLog(logger, 'info', 'playback_render_summary', {
+      reason,
+      windowMs: Math.round(windowMs),
+      renderCount: renderDiagnostics.count,
+      averageDurationMs: Number(
+        (renderDiagnostics.totalDurationMs / renderDiagnostics.count).toFixed(2)
+      ),
+      maxDurationMs: Number(renderDiagnostics.maxDurationMs.toFixed(2)),
+      phase: renderDiagnostics.lastPhase,
+      writerBlocked: Boolean(dynamicWriter?.blocked),
+      terminalRows: process.stdout.rows || 24,
+      terminalColumns: process.stdout.columns || 80
+    });
+    renderDiagnostics = {
+      startedAt: performance.now(), count: 0, totalDurationMs: 0, maxDurationMs: 0,
+      lastPhase: renderDiagnostics.lastPhase
+    };
+  };
+  const recordRenderDiagnostic = (startedAt, phase) => {
+    const durationMs = performance.now() - startedAt;
+    renderDiagnostics.count += 1;
+    renderDiagnostics.totalDurationMs += durationMs;
+    renderDiagnostics.maxDurationMs = Math.max(renderDiagnostics.maxDurationMs, durationMs);
+    renderDiagnostics.lastPhase = phase || 'normal';
+    if (performance.now() - renderDiagnostics.startedAt >= 5000) flushRenderDiagnostics();
+  };
+
   const render = () => {
     if (!tty || finished || headerRendering || pageTransitionDepth > 0) return;
+    const renderStartedAt = performance.now();
     if (refreshTimer) clearTimeout(refreshTimer);
     const rawElapsedMs = clock.position();
     const elapsedMs = sessionEnded ? activeDurationMs : displayPosition(rawElapsedMs, activeOffsetMs);
@@ -1624,7 +1848,7 @@ export async function playWithProgress({
         easterEgg.transitionElapsedMs,
         terminalRows
       );
-      writeCreditsTransitionRows(entries);
+      writeCreditsTransitionRows(entries, dynamicWriter?.write);
     } else {
       const creditsOrdinaryPlayer = ['player-intro', 'player'].includes(easterEgg?.phase);
       if (creditsOrdinaryPlayer && !creditsFullPlayerActive) {
@@ -1658,6 +1882,7 @@ export async function playWithProgress({
         verticalLayout: creditsOrdinaryPlayer ? creditsPlayerVerticalLayout : null
       });
     }
+    recordRenderDiagnostic(renderStartedAt, easterEgg?.phase || 'normal');
     const indicatorDelay = indicator ? Math.max(20, indicatorUntil - now) : Infinity;
     const easterEggPhaseDelay = easterEgg?.nextChangeDelayMs ?? Infinity;
     refreshTimer = setTimeout(render, Math.min(
@@ -1898,7 +2123,7 @@ export async function playWithProgress({
 
   const drawHeader = async (
     transitionSignal = null,
-    { allowNativeGraphics = false, preloadedCoverBuffer = null } = {}
+    { allowNativeGraphics = false, preloadedCoverBuffer = null, reason = 'unspecified' } = {}
   ) => {
     if (!tty) return;
     headerAbortController?.abort();
@@ -1909,6 +2134,15 @@ export async function playWithProgress({
     const headerSignal = headerSignals.length > 1
       ? AbortSignal.any(headerSignals)
       : controller.signal;
+    const headerStartedAt = Date.now();
+    let headerStatus = 'pending';
+    mediaLog(logger, 'info', 'playback_header_started', {
+      renderId, reason, songId: activeSong?.id,
+      terminalRows: process.stdout.rows || 24,
+      terminalColumns: process.stdout.columns || 80,
+      imageProtocol, preloadedCover: Boolean(preloadedCoverBuffer)
+    });
+    try {
     const songSnapshot = activeSong;
     headerRendering = true;
     dynamicAnchored = false;
@@ -1965,6 +2199,7 @@ export async function playWithProgress({
         );
         dynamicAnchored = true;
         headerRendering = false;
+        headerStatus = 'success';
         render();
         return;
       }
@@ -1994,6 +2229,7 @@ export async function playWithProgress({
       process.stdout.write('\x1b[s');
       dynamicAnchored = true;
       headerRendering = false;
+      headerStatus = 'success';
       render();
       return;
     }
@@ -2005,6 +2241,8 @@ export async function playWithProgress({
           maxRows: verticalLayout.coverRows,
           allowNativeGraphics,
           preloadedBuffer: preloadedCoverBuffer,
+          logger,
+          diagnosticContext: 'playback_header',
           shouldRender: () => !headerSignal.aborted && renderId === headerRenderId && !finished
         })
       : 0;
@@ -2022,7 +2260,23 @@ export async function playWithProgress({
     process.stdout.write('\x1b[s');
     dynamicAnchored = true;
     headerRendering = false;
+    headerStatus = 'success';
     render();
+    } finally {
+      if (headerStatus === 'pending') {
+        headerStatus = headerSignal.aborted || finished || renderId !== headerRenderId
+          ? 'cancelled'
+          : 'failed';
+      }
+      mediaLog(logger, headerStatus === 'failed' ? 'warn' : 'info', 'playback_header_completed', {
+        renderId, reason, songId: activeSong?.id, status: headerStatus,
+        durationMs: Date.now() - headerStartedAt,
+        terminalRows: process.stdout.rows || 24,
+        terminalColumns: process.stdout.columns || 80,
+        dynamicRow, metadataVisible: activeHeaderMetadataVisible,
+        coverRows: activeVerticalLayout?.coverRows ?? null
+      });
+    }
   };
 
   const transitionTo = async (targetIndex, cause = 'manual') => {
@@ -2147,7 +2401,8 @@ export async function playWithProgress({
           // header 渲染，以便按 imageProtocol 使用 Kitty/SIXEL/chafa/ANSI。
           await drawHeader(transitionController.signal, {
             allowNativeGraphics: true,
-            preloadedCoverBuffer: prepared.coverBuffer
+            preloadedCoverBuffer: prepared.coverBuffer,
+            reason: 'track_change_after_transition'
           });
         } catch (headerError) {
           if (headerError?.name === 'AbortError') throw headerError;
@@ -2182,7 +2437,7 @@ export async function playWithProgress({
         directAnimation,
         drawHeader: directAnimation
           ? () => playDirectCreditsEntryTransition(transitionController.signal)
-          : () => drawHeader(transitionController.signal),
+          : () => drawHeader(transitionController.signal, { reason: 'track_change' }),
         signal: transitionController.signal,
         startPlayback: async () => {
           if (closing || transitionController.signal.aborted) return;
@@ -2265,7 +2520,7 @@ export async function playWithProgress({
         render();
         return;
       }
-      void drawHeader().catch((error) => {
+      void drawHeader(null, { reason: 'manual_refresh' }).catch((error) => {
         if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
       });
       return;
@@ -2324,7 +2579,7 @@ export async function playWithProgress({
       setIndicator(`随机模式：${randomLabels[randomMode]}`);
       updateSmtcControls();
       render();
-      void drawHeader().catch((error) => {
+      void drawHeader(null, { reason: 'random_mode_change' }).catch((error) => {
         if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
       });
       return;
@@ -2334,7 +2589,7 @@ export async function playWithProgress({
       setIndicator(`循环模式：${loopLabels[loopMode]}`);
       updateSmtcControls();
       render();
-      void drawHeader().catch((error) => {
+      void drawHeader(null, { reason: 'loop_mode_change' }).catch((error) => {
         if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
       });
       return;
@@ -2356,7 +2611,7 @@ export async function playWithProgress({
           setIndicator(result?.alreadyPresent ? '当前歌曲已在喜欢的音乐中' : '已添加至喜欢的音乐');
         }
         render();
-        void drawHeader().catch((error) => {
+        void drawHeader(null, { reason: 'favorite_change' }).catch((error) => {
           if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
         });
       }, (error) => {
@@ -2477,7 +2732,7 @@ export async function playWithProgress({
   const resizeRefresh = createLatestDebounce(() => {
     if (finished || closing || trackTransitioning || pageTransitionDepth > 0) return;
     if (creditsPlayerTransitionActive()) return;
-    void drawHeader().catch((error) => {
+    void drawHeader(null, { reason: 'resize' }).catch((error) => {
       if (error?.name !== 'AbortError') void logger?.warn('playback_resize_refresh_failed', { error });
     });
   }, 180);
@@ -2552,7 +2807,7 @@ export async function playWithProgress({
         }
         if (closing) return await completion;
       } else {
-        await drawHeader();
+        await drawHeader(null, { reason: 'initial' });
         restoreInput = setupRawInput(rl, handleData);
         process.stdout.on('resize', resize);
       }
@@ -2580,6 +2835,7 @@ export async function playWithProgress({
     signal?.removeEventListener('abort', abort);
     process.stdout.removeListener('resize', resize);
     resizeRefresh.cancel();
+    flushRenderDiagnostics('playback_end');
     dynamicWriter?.close();
     try {
       await offsetPersistence;
