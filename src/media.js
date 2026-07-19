@@ -1568,13 +1568,13 @@ export async function tryRenderImage(source, {
   const current = () => !signal?.aborted && (!guarded || shouldRender());
   const columns = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  const width = Math.max(1, Math.min(size === 'playback' ? 52 : 56, columns - 2));
+  const width = Math.max(1, Math.min(size === 'playback' ? 52 : 112, columns - 2));
   const plannedRows = Number.isFinite(Number(maxRows))
     ? Math.max(1, Math.floor(Number(maxRows)))
     : Math.max(1, rows - 8);
   const height = size === 'playback'
     ? Math.max(1, Math.min(20, plannedRows))
-    : Math.max(1, Math.min(22, Math.floor(rows * 0.36), plannedRows));
+    : Math.max(1, Math.min(64, Math.floor(rows * 0.65), plannedRows));
   mediaLog(logger, 'info', 'image_render_started', {
     ...common,
     preloaded: Boolean(preloadedBuffer),

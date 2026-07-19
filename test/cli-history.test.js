@@ -20,9 +20,9 @@ test('子界面输入不会进入 readline 历史', async () => {
 });
 
 test('歌单详情预览数量随终端高度和封面占用变化', () => {
-  assert.equal(playlistPreviewLimit(24, 0, false), 14);
-  assert.equal(playlistPreviewLimit(40, 0, false), 30);
-  assert.equal(playlistPreviewLimit(24, 8, true), 5);
+  assert.equal(playlistPreviewLimit(24, 0, false), 12);
+  assert.equal(playlistPreviewLimit(40, 0, false), 28);
+  assert.equal(playlistPreviewLimit(24, 8, true), 3);
   assert.equal(playlistPreviewLimit(8, 20, true), 1);
 });
 

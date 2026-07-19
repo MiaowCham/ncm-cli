@@ -242,6 +242,8 @@ async function showSong(
 ) {
   console.log();
   let transitionCoverRows = [];
+  const detailRows = output.rows || 24;
+  const fontRecommendation = creditsFontRecommendation(song);
   const coverRows = song.cover
     ? await tryRenderImage(song.cover, {
       signal,
@@ -251,7 +253,8 @@ async function showSong(
         logger,
         diagnosticContext: 'song_detail',
         imageCacheMaxBytes,
-      imageIdentity: { type: 'track-cover', id: song.id },
+        maxRows: Math.max(1, detailRows - 14 - (fontRecommendation ? 1 : 0)),
+        imageIdentity: { type: 'track-cover', id: song.id },
         forceRefresh: Boolean(pageState.forceCoverRefresh),
         preloadedBuffer: pageState.preloadedCoverBuffer,
         deferLoad: true,
@@ -272,8 +275,7 @@ async function showSong(
     chalk.bold.green(metadataLines[0]),
     ...metadataLines.slice(1)
   ];
-  const fontRecommendation = creditsFontRecommendation(song);
-  const previewCapacity = Math.max(0, (output.rows || 24) - coverRows - 10 - (fontRecommendation ? 1 : 0));
+  const previewCapacity = Math.max(0, detailRows - coverRows - 10 - (fontRecommendation ? 1 : 0));
   const capacity = Math.max(0, previewCapacity - 1);
   const preview = songLyricPreview(lyrics, capacity);
   if (preview.length) {
@@ -1318,7 +1320,8 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
 }
 
 export function playlistPreviewLimit(rows, coverRows = 0, hasDescription = false) {
-  const available = Math.floor(Number(rows) || 24) - Math.max(0, coverRows) - 10 - (hasDescription ? 1 : 0);
+  // Keep two terminal rows clear so a trailing newline or a one-row chafa overrun cannot scroll the page.
+  const available = Math.floor(Number(rows) || 24) - Math.max(0, coverRows) - 12 - (hasDescription ? 1 : 0);
   return Math.max(1, available);
 }
 
@@ -1358,6 +1361,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
   const renderDetail = async (pageState = {}) => {
     console.log();
     let transitionCoverRows = [];
+    const detailRows = output.rows || 24;
     const coverRows = cover ? await tryRenderImage(cover, {
       signal: context.signal,
       size: 'detail',
@@ -1366,6 +1370,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
       logger: context.logger,
       diagnosticContext: 'playlist_detail',
       imageCacheMaxBytes: context.settings.cacheMaxBytes,
+      maxRows: Math.max(1, detailRows - 15 - (playlist.description ? 1 : 0) - (linksVisible ? 2 : 0)),
       imageIdentity: { type: 'playlist-cover', id: playlist.id || id },
       forceRefresh: forceCoverRefresh,
       preloadedBuffer: pageState.preloadedCoverBuffer,
