@@ -1016,9 +1016,28 @@ export function planPlaybackVerticalLayout({
   return Object.freeze({ ...visible, capacity, unusedRows: Math.max(0, capacity - (used() - (visible.compactRequired ? 1 : 0))) });
 }
 
-export function playbackCoverRowBudget(rows) {
+export function planCoverSize({ columns = 80, rows = 24, maxRows, imageRenderMaxRows } = {}) {
+  const terminalColumns = Math.max(1, Math.floor(Number(columns) || 80));
+  const terminalRows = Math.max(1, Math.floor(Number(rows) || 24));
+  const layoutLimit = Number.isFinite(Number(maxRows))
+    ? Math.max(1, Math.floor(Number(maxRows)))
+    : Math.max(1, terminalRows - 8);
+  const performanceLimit = Number.isFinite(Number(imageRenderMaxRows))
+    ? Math.max(1, Math.floor(Number(imageRenderMaxRows)))
+    : Infinity;
+  const height = Math.max(1, Math.min(layoutLimit, performanceLimit, Math.floor(terminalRows * 0.4)));
+  return {
+    width: Math.max(1, Math.min(terminalColumns - 2, height * 2)),
+    height
+  };
+}
+
+export function playbackCoverRowBudget(rows, maxRenderRows = Infinity) {
   const height = Math.max(0, Math.floor(Number(rows) || 0));
-  return height > 1 ? Math.max(7, Math.min(20, Math.floor(height * 0.36))) : 0;
+  const limit = Number.isFinite(Number(maxRenderRows))
+    ? Math.max(7, Math.floor(Number(maxRenderRows)))
+    : Infinity;
+  return height > 1 ? Math.max(1, Math.min(limit, Math.max(7, Math.floor(height * 0.4)))) : 0;
 }
 
 export function compactPlaybackRequiredRow(currentLyric, progress, columns) {
@@ -1357,7 +1376,7 @@ export function playbackMetadataRows(song, backendLabel, columns, visibleRows = 
 
 async function buildTextPlaybackHeaderRows(song, {
   signal, columns, layout, protocol = 'ansi', imageCacheMaxBytes, logger,
-  preloadedBuffer = null
+  preloadedBuffer = null, imageRenderMaxRows, onRenderPerformance
 }) {
   const coverRows = [];
   let coverBuffer = null;
@@ -1367,11 +1386,22 @@ async function buildTextPlaybackHeaderRows(song, {
         ?? await loadImage(song.cover, signal, {
           imageCacheMaxBytes, logger, imageIdentity: { type: 'track-cover', id: song.id }
         });
-      const width = Math.max(1, Math.min(52, columns - 2));
-      const text = await renderAnsiBlocks(coverBuffer, width, layout.coverRows, {
+      const { width, height } = planCoverSize({
+        columns, rows: layout.capacity, maxRows: layout.coverRows, imageRenderMaxRows
+      });
+      const renderStartedAt = Date.now();
+      const text = await renderAnsiBlocks(coverBuffer, width, height, {
         compactColor: protocol === 'ansi256'
       });
       coverRows.push(...text.split(/\r?\n/));
+      onRenderPerformance?.({
+        requestedProtocol: protocol,
+        selectedProtocol: protocol === 'ansi256' ? 'ansi256' : 'ansi',
+        renderMs: Date.now() - renderStartedAt,
+        width,
+        height,
+        resultRows: coverRows.length
+      });
     } catch { coverBuffer = null; }
   }
   return { coverRows, coverBuffer };
@@ -1551,7 +1581,7 @@ export async function tryRenderImage(source, {
   allowNativeGraphics = false, preloadedBuffer = null, logger = null,
   diagnosticContext = 'unknown', imageCacheMaxBytes,
   deferLoad = false, onDeferredReady = null, imageIdentity = null,
-  forceRefresh = false
+  forceRefresh = false, imageRenderMaxRows, onRenderPerformance
 } = {}) {
   const renderStartedAt = Date.now();
   const common = { context: diagnosticContext, size, requestedProtocol: protocol };
@@ -1568,13 +1598,7 @@ export async function tryRenderImage(source, {
   const current = () => !signal?.aborted && (!guarded || shouldRender());
   const columns = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  const width = Math.max(1, Math.min(size === 'playback' ? 52 : 112, columns - 2));
-  const plannedRows = Number.isFinite(Number(maxRows))
-    ? Math.max(1, Math.floor(Number(maxRows)))
-    : Math.max(1, rows - 8);
-  const height = size === 'playback'
-    ? Math.max(1, Math.min(20, plannedRows))
-    : Math.max(1, Math.min(64, Math.floor(rows * 0.65), plannedRows));
+  const { width, height } = planCoverSize({ columns, rows, maxRows, imageRenderMaxRows });
   mediaLog(logger, 'info', 'image_render_started', {
     ...common,
     preloaded: Boolean(preloadedBuffer),
@@ -1618,6 +1642,18 @@ export async function tryRenderImage(source, {
       preloaded: Boolean(preloadedBuffer)
     });
     if (!current()) return finish(0, 'cancelled', { stage: 'source_loaded' });
+    const pipelineStartedAt = Date.now();
+    const reportPerformance = (selectedProtocol, resultRows = height) => {
+      const renderMs = Date.now() - pipelineStartedAt;
+      try {
+        onRenderPerformance?.({
+          requestedProtocol: protocol, selectedProtocol, renderMs, width, height, resultRows
+        });
+      } catch (error) {
+        mediaLog(logger, 'warn', 'image_render_performance_callback_failed', { ...common, error });
+      }
+      return renderMs;
+    };
     if (typeof onTextRows === 'function') {
       const snapshotStartedAt = Date.now();
       try {
@@ -1667,7 +1703,9 @@ export async function tryRenderImage(source, {
             ...common, selectedProtocol, status: success ? 'success' : 'unsupported',
             durationMs: Date.now() - attemptStartedAt, resultRows: success ? height : 0
           });
-          if (success) return finish(height, 'success', { selectedProtocol, width, height });
+          if (success) return finish(height, 'success', {
+            selectedProtocol, width, height, renderMs: reportPerformance(selectedProtocol)
+          });
         } catch (error) {
           mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
             ...common, selectedProtocol, status: 'failed',
@@ -1699,7 +1737,10 @@ export async function tryRenderImage(source, {
               durationMs: Date.now() - attemptStartedAt, outputBytes: output.length,
               resultRows: height
             });
-            return finish(height, 'success', { selectedProtocol, width, height, encodeMs, writeMs });
+            return finish(height, 'success', {
+              selectedProtocol, width, height, encodeMs, writeMs,
+              renderMs: reportPerformance(selectedProtocol, resultRows)
+            });
           }
           mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
             ...common, selectedProtocol, status: 'failed', encodeMs,
@@ -1737,7 +1778,9 @@ export async function tryRenderImage(source, {
               durationMs: Date.now() - attemptStartedAt,
               outputBytes: Buffer.byteLength(output), resultRows
             });
-            return finish(resultRows, 'success', { selectedProtocol, width, height, encodeMs, writeMs });
+            return finish(resultRows, 'success', {
+              selectedProtocol, width, height, encodeMs, writeMs, renderMs: reportPerformance(selectedProtocol)
+            });
           }
           mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
             ...common, selectedProtocol, status: 'failed', encodeMs,
@@ -1770,7 +1813,10 @@ export async function tryRenderImage(source, {
             durationMs: Date.now() - attemptStartedAt,
             outputBytes: Buffer.byteLength(output), resultRows
           });
-          return finish(resultRows, 'success', { selectedProtocol, width, height, encodeMs, writeMs });
+          return finish(resultRows, 'success', {
+            selectedProtocol, width, height, encodeMs, writeMs,
+            renderMs: reportPerformance(selectedProtocol, resultRows)
+          });
         } catch (error) {
           mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {
             ...common, selectedProtocol, status: 'failed',
@@ -1801,6 +1847,8 @@ export async function playWithProgress({
   playerBackend = 'auto',
   imageProtocol = 'auto',
   imageCacheMaxBytes = 100 * 1024 * 1024,
+  imageRenderMaxRows,
+  onImageRenderPerformance,
   playlist = { name: '', tracks: [], currentIndex: 0 },
   signal,
   logger,
@@ -1833,6 +1881,12 @@ export async function playWithProgress({
       }
     )
   }) : null;
+  const observeImageRenderPerformance = (sample) => {
+    const nextLimit = onImageRenderPerformance?.(sample);
+    if (Number.isFinite(Number(nextLimit))) imageRenderMaxRows = Number(nextLimit);
+    else if (nextLimit === Infinity) imageRenderMaxRows = Infinity;
+    return nextLimit;
+  };
   let activeSong = song;
   let activeUrl = url;
   let activeDurationMs = durationMs;
@@ -2461,7 +2515,7 @@ export async function playWithProgress({
     const terminalRows = Math.max(1, process.stdout.rows || 24);
     const terminalColumns = Math.max(1, process.stdout.columns || 80);
     const desiredCoverRows = activeSong.cover && imageProtocol !== 'none'
-      ? playbackCoverRowBudget(terminalRows)
+      ? playbackCoverRowBudget(terminalRows, imageRenderMaxRows)
       : 0;
     let layout = verticalLayoutFor(activeSong, terminalRows, terminalColumns, desiredCoverRows);
     const prepared = await buildTextPlaybackHeaderRows(activeSong, {
@@ -2471,7 +2525,9 @@ export async function playWithProgress({
       layout,
       protocol: imageProtocol,
       imageCacheMaxBytes,
-      logger
+      logger,
+      imageRenderMaxRows,
+      onRenderPerformance: observeImageRenderPerformance
     });
     if (transitionSignal?.aborted) {
       throw transitionSignal.reason ?? new DOMException('切歌转场已取消', 'AbortError');
@@ -2545,7 +2601,7 @@ export async function playWithProgress({
     const initialRows = Math.max(1, process.stdout.rows || 24);
     const initialColumns = Math.max(1, process.stdout.columns || 80);
     const desiredCoverRows = songSnapshot.cover && imageProtocol !== 'none'
-      ? playbackCoverRowBudget(initialRows)
+      ? playbackCoverRowBudget(initialRows, imageRenderMaxRows)
       : 0;
     let verticalLayout = verticalLayoutFor(songSnapshot, initialRows, initialColumns, desiredCoverRows);
     const creditsConfig = easterEggForSong(songSnapshot);
@@ -2597,7 +2653,9 @@ export async function playWithProgress({
           : await buildTextPlaybackHeaderRows(songSnapshot, {
               signal: headerSignal, backendLabel, columns: initialColumns,
               layout: verticalLayout, protocol: imageProtocol,
-              imageCacheMaxBytes, logger, preloadedBuffer: availableCoverBuffer
+              imageCacheMaxBytes, logger, preloadedBuffer: availableCoverBuffer,
+              imageRenderMaxRows,
+              onRenderPerformance: observeImageRenderPerformance
             }));
         if (headerSignal.aborted || renderId !== headerRenderId || finished) return;
         verticalLayout = prepared.layout;
@@ -2623,7 +2681,9 @@ export async function playWithProgress({
       const prepareCreditsHeader = buildTextPlaybackHeaderRows(songSnapshot, {
         signal: headerSignal, backendLabel, columns: initialColumns,
         layout: verticalLayout, protocol: imageProtocol,
-        imageCacheMaxBytes, logger, preloadedBuffer: preloadedCoverBuffer
+        imageCacheMaxBytes, logger, preloadedBuffer: preloadedCoverBuffer,
+        imageRenderMaxRows,
+        onRenderPerformance: observeImageRenderPerformance
       });
       if (creditsTimeline?.phase?.endsWith('-transition')) {
         const prepared = normalizeCreditsHeader(await prepareCreditsHeader);
@@ -2660,6 +2720,8 @@ export async function playWithProgress({
           logger,
           diagnosticContext: 'playback_header',
           imageCacheMaxBytes,
+          imageRenderMaxRows,
+          onRenderPerformance: observeImageRenderPerformance,
           imageIdentity: { type: 'track-cover', id: songSnapshot.id },
           deferLoad: true,
           onDeferredReady: (buffer) => {

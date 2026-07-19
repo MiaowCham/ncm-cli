@@ -16,6 +16,9 @@ import { resolveNeteaseMusicInput } from './music-link.js';
 import { chooseLyricSource } from './lyrics.js';
 import { writeExport } from './output-file.js';
 import { cleanupStalePlayerSessions } from './player-registry.js';
+import {
+  createImageRenderPerformance, loadImageRenderProfile, saveImageRenderProfile
+} from './image-render-profile.js';
 import { cacheSongMusic, readSongUserState, updateSongUserState } from './resource-cache.js';
 import { importLyricsFile, removeUserLyrics } from './lyric-import.js';
 import { clearDataCache, inspectDataCache } from './data-cache.js';
@@ -238,7 +241,7 @@ export function songDetailMetadataLines(song, platform = process.platform) {
 
 async function showSong(
   song, signal, imageProtocol = 'auto', lyrics = null, logger = null,
-  imageCacheMaxBytes, pageState = {}
+  imageCacheMaxBytes, imageRenderPerformance, pageState = {}
 ) {
   console.log();
   let transitionCoverRows = [];
@@ -253,6 +256,8 @@ async function showSong(
         logger,
         diagnosticContext: 'song_detail',
         imageCacheMaxBytes,
+        imageRenderMaxRows: imageRenderPerformance?.maxRows(imageProtocol),
+        onRenderPerformance: (sample) => imageRenderPerformance?.observe(sample),
         maxRows: Math.max(1, detailRows - 14 - (fontRecommendation ? 1 : 0)),
         imageIdentity: { type: 'track-cover', id: song.id },
         forceRefresh: Boolean(pageState.forceCoverRefresh),
@@ -814,6 +819,8 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
     imageCacheMaxBytes: context.settings.cacheMaxBytes,
+    imageRenderMaxRows: context.imageRenderPerformance?.maxRows(context.settings.imageProtocol),
+    onImageRenderPerformance: (sample) => context.imageRenderPerformance?.observe(sample),
     signal,
     logger,
     rl,
@@ -887,7 +894,8 @@ async function songMenuInScreen(rl, api, song, context) {
         forceCoverRefresh = false;
         return showSong(
           song, signal, context.settings.imageProtocol, cachedLyrics, context.logger,
-          context.settings.cacheMaxBytes, { ...pageState, forceCoverRefresh: force }
+          context.settings.cacheMaxBytes, context.imageRenderPerformance,
+          { ...pageState, forceCoverRefresh: force }
         );
       },
       () => detailFooterPrompt(
@@ -1273,6 +1281,8 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
     imageCacheMaxBytes: context.settings.cacheMaxBytes,
+    imageRenderMaxRows: context.imageRenderPerformance?.maxRows(context.settings.imageProtocol),
+    onImageRenderPerformance: (sample) => context.imageRenderPerformance?.observe(sample),
     playlist: { name: playlist.name, tracks, currentIndex: activeIndex },
     signal: context.signal,
     logger: context.logger,
@@ -1370,6 +1380,8 @@ async function playlistMenuInScreen(rl, api, id, context) {
       logger: context.logger,
       diagnosticContext: 'playlist_detail',
       imageCacheMaxBytes: context.settings.cacheMaxBytes,
+      imageRenderMaxRows: context.imageRenderPerformance?.maxRows(context.settings.imageProtocol),
+      onRenderPerformance: (sample) => context.imageRenderPerformance?.observe(sample),
       maxRows: Math.max(1, detailRows - 15 - (playlist.description ? 1 : 0) - (linksVisible ? 2 : 0)),
       imageIdentity: { type: 'playlist-cover', id: playlist.id || id },
       forceRefresh: forceCoverRefresh,
@@ -1825,6 +1837,7 @@ export async function main(args = []) {
   const logger = new Logger();
   const controller = new AbortController();
   let rl = null;
+  let imageRenderPerformance = null;
   let shuttingDown = false;
   const shutdown = (source = 'signal') => {
     if (shuttingDown) return;
@@ -1850,6 +1863,10 @@ export async function main(args = []) {
     if (stalePlayers.cleaned) console.log(`已清理上次遗留的播放器：${stalePlayers.cleaned} 个`);
     const cookie = await loadCookie();
     const settings = await loadSettings();
+    imageRenderPerformance = createImageRenderPerformance(await loadImageRenderProfile(), {
+      persist: saveImageRenderProfile,
+      logger
+    });
     const startupApiCommand = args.length ? parseApiCommand(args.join(' ')) : null;
     let apiConfiguredFromArguments = false;
     if (!settings.apiBaseUrl && startupApiCommand?.url && !process.env.NCM_API_BASE_URL?.trim()) {
@@ -1894,6 +1911,7 @@ export async function main(args = []) {
 
     const context = {
       authState, signal: controller.signal, logger, settings, shutdown,
+      imageRenderPerformance,
       apiFromEnvironment: apiConfiguration.fromEnvironment
     };
     printHomeBanner(api, context);
@@ -1925,6 +1943,7 @@ export async function main(args = []) {
     rl?.removeListener('SIGINT', onSigint);
     rl?.close();
     await closeRetainedSmtc();
+    await imageRenderPerformance?.flush();
     await logger.flush();
   }
 }
