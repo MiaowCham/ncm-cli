@@ -1080,7 +1080,13 @@ function renderDynamic({
               : tone === 'current' ? primaryText(text) : chalk.white(text);
           return { line, tone, rendered };
         })
-      : [{ line: null, tone: 'current', rendered: currentLyricOnly ? '' : secondaryText(truncateText('暂无逐行歌词', columns)) }];
+      : [{
+          line: null,
+          tone: 'current',
+          // 已解析歌词在歌曲结束或持续时长全部结束后允许留空，
+          // 只有完全没有歌词时才显示占位提示。
+          rendered: lyrics.length ? '' : (currentLyricOnly ? '' : secondaryText(truncateText('暂无逐行歌词', columns)))
+        }];
     const current = lyricRows.find((item) => item.tone === 'current' && !item.line?.translation) ?? lyricRows[0];
     requiredContentRows = [current.rendered];
     optionalPrefixRows = [''];
