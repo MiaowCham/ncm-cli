@@ -732,9 +732,12 @@ function unavailableUrlMessage(result, authState) {
 async function updateLikedPlaylist(api, song, context, operation = 'add') {
   const uid = context.authState.profile?.userId || context.authState.account?.id;
   if (!uid) throw new Error('无法确定当前登录用户');
-  context.likedPlaylistPromise ||= api.userPlaylists(uid, { signal: context.signal }).then((playlists) => {
+  context.likedPlaylistPromise ||= api.userPlaylists(uid, {
+    signal: context.signal, username: context.authState.profile?.nickname
+  }).then((playlists) => {
+    const username = context.authState.profile?.nickname || '';
     const liked = playlists.find((playlist) => playlist.specialType === 5
-      || /喜欢的音乐\s*$/.test(playlist.name));
+      || String(playlist.name || '').trim() === `${username}喜欢的音乐`);
     if (!liked) throw new Error('未找到“喜欢的音乐”歌单');
     return liked.id;
   });
@@ -811,7 +814,12 @@ async function songMenuInScreen(rl, api, song, context) {
   if (authState.loggedIn) {
     const uid = authState.profile?.userId || authState.account?.id;
     if (uid) {
-      try { favorited = await api.isSongLiked(uid, song.id, { signal }); }
+      try {
+        favorited = await api.isSongLiked(uid, song.id, {
+          signal, username: authState.profile?.nickname
+        });
+        void context.logger.info('liked_cache_result', { songId: song.id, favorited });
+      }
       catch (error) {
         if (!isAbortError(error)) void context.logger.warn('liked_cache_lookup_failed', { songId: song.id, error });
       }

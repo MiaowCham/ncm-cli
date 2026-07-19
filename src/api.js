@@ -49,8 +49,11 @@ function normalizePlaylist(raw = {}) {
   };
 }
 
-function isLikedPlaylist(playlist) {
-  return playlist.specialType === 5 || /喜欢的音乐\s*$/.test(playlist.name);
+function isLikedPlaylist(playlist, username = '') {
+  if (playlist.specialType === 5) return true;
+  const name = String(playlist.name || '').trim();
+  const user = String(username || '').trim();
+  return Boolean(user && name === `${user}喜欢的音乐`);
 }
 
 export class NcmApi {
@@ -154,6 +157,7 @@ export class NcmApi {
     const {
       pageSize: requestedPageSize = 1000,
       maxPlaylists: requestedMaxPlaylists = 10000,
+      username,
       ...requestOptions
     } = options;
     const pageSize = Math.max(1, Math.min(1000, Math.trunc(Number(requestedPageSize)) || 1000));
@@ -182,8 +186,8 @@ export class NcmApi {
     }
 
     return [
-      ...playlists.filter(isLikedPlaylist),
-      ...playlists.filter((playlist) => !isLikedPlaylist(playlist))
+      ...playlists.filter((playlist) => isLikedPlaylist(playlist, username)),
+      ...playlists.filter((playlist) => !isLikedPlaylist(playlist, username))
     ];
     }, { ...this.cacheOptions(options), ttlMs: 5 * 60 * 1000 });
   }
@@ -262,7 +266,7 @@ export class NcmApi {
   async isSongLiked(uid, songId, options = {}) {
     const playlists = await readCachedJson({ type: 'user-playlists-metadata', id: uid });
     if (!Array.isArray(playlists)) return false;
-    const liked = playlists.find(isLikedPlaylist);
+    const liked = playlists.find((playlist) => isLikedPlaylist(playlist, options.username));
     if (!liked) return false;
     const tracks = await readCachedJson({ type: 'playlist-tracks-metadata', id: liked.id });
     if (!Array.isArray(tracks)) return false;
