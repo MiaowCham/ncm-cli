@@ -43,7 +43,7 @@ export const QUALITY_LEVELS = Object.freeze([
   'standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'sky', 'dolby', 'jymaster'
 ]);
 
-export const PLAYER_BACKENDS = Object.freeze(['auto', 'mpv', 'vlc', 'ffplay']);
+export const PLAYER_BACKENDS = Object.freeze(['auto', 'mpv', 'vlc', 'media-player', 'ffplay']);
 export const IMAGE_PROTOCOLS = Object.freeze([
   'auto', 'sixel', 'kitty', 'iterm2', 'symbols', 'ansi', 'ansi256', 'none'
 ]);

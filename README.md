@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/MiaowCham/ncm-cli/blob/main/LICENSE)
 [![GitHub last commit](https://img.shields.io/github/last-commit/MiaowCham/ncm-cli)](https://github.com/MiaowCham/ncm-cli/commits/main)
 
-一个运行在终端中的网易云音乐播放器。支持歌曲与歌词搜索、歌单浏览、扫码或 Cookie 登录、逐行歌词、封面显示、播放列表，以及 mpv、VLC 和 ffplay 播放后端。
+一个运行在终端中的网易云音乐播放器。支持歌曲与歌词搜索、歌单浏览、扫码或 Cookie 登录、逐行歌词、封面显示、播放列表，以及 mpv、VLC、Windows MediaPlayer 和 ffplay 播放后端。
 
 > [!NOTE]
 > 本项目由 OpenAI Codex 制作  
@@ -30,7 +30,7 @@
 - `vlc`
 - `ffplay`
 
-播放器需要加入 `PATH`。自动选择顺序为 `mpv → VLC → ffplay`。
+外部播放器需要加入 `PATH`。Windows 构建 SMTC helper 后还可直接使用系统 MediaPlayer；自动选择顺序为 `mpv → VLC → MediaPlayer → ffplay`。其他系统仍为 `mpv → VLC → ffplay`。
 
 ```bash
 npm install
@@ -45,7 +45,7 @@ ncm
 ```
 
 > [!NOTE]
-> Windows 下，`npm install` 会尝试使用 .NET 8 SDK 构建 SMTC helper。缺少 SDK 不会影响普通播放；安装 SDK 后可运行 `npm run build:smtc` 补充构建。
+> Windows 下，`npm install` 会尝试使用 Go 1.25 或更高版本构建 SMTC helper。缺少 Go 不会影响 MPV、VLC 或 ffplay 播放；安装 Go 后可运行 `npm run build:smtc` 补充构建。Windows MediaPlayer 后端依赖该 helper。
 
 首次启动会要求填写 API 地址并保存至 `settings.json`。也可通过环境变量临时指定：
 
@@ -107,7 +107,7 @@ id 347230
 | `/cache [MB]` | 查看或设置整体缓存上限 |
 | `/clrcache [covers\|musics\|other]` | 查看或分类清理本地缓存 |
 
-播放器后端支持 `auto`、`mpv`、`vlc`、`ffplay`；图片协议支持 `auto`、`sixel`、`kitty`、`iterm2`、`symbols`、`ansi`、`none`。
+播放器后端支持 `auto`、`mpv`、`vlc`、`media-player`、`ffplay`；`media-player` 仅在 Windows 可用。图片协议支持 `auto`、`sixel`、`kitty`、`iterm2`、`symbols`、`ansi`、`none`。
 
 音质可选值：
 
@@ -136,6 +136,7 @@ jyeffect  sky     dolby   jymaster
 |---|---|
 | `p` | 进入播放页 |
 | `l` | 导出歌词 |
+| `i` | 从本地文件导入歌词 |
 | `u` | 显示或隐藏播放与封面链接 |
 | `f` | 收藏或取消收藏歌曲（仅登录后显示） |
 | `q` | 返回上一级 |
@@ -151,6 +152,7 @@ jyeffect  sky     dolby   jymaster
 | `↑` / `↓` | 调整音量 |
 | `Ctrl+↑` / `Ctrl+↓` | 以 50 ms 调整播放时间偏移 |
 | `t` | 开关翻译歌词 |
+| `i` | 从本地文件导入歌词 |
 | `f` | 收藏或取消收藏当前歌曲（仅登录后显示） |
 | `r` | 刷新播放页面 |
 | `q` | 停止播放并返回 |
@@ -216,7 +218,7 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 
 默认配置存放在操作系统的用户配置目录，可通过 `NCM_CLI_CONFIG_DIR` 修改位置。
 
-曲目封面和歌单封面保存在同一配置目录下的 `data-cache` 中，路径分别为 `Covers/song/<id>.png` 和 `Covers/playlist/<id>.png`。歌曲音频写入 `Musics/song/<id>.cache`，歌词写入 `Lyrics/song/<id>.lrc`，歌曲、歌单和歌单成员元数据以 JSON 写入 `Metadata/<type>/<id>.metadata`。缓存以资源类型和网易云 ID 作为稳定身份，不依赖临时下载链接。
+曲目封面和歌单封面保存在同一配置目录下的 `data-cache` 中，路径分别为 `Covers/song/<id>.png` 和 `Covers/playlist/<id>.png`。歌曲音频写入 `Musics/song/<id>.cache`，抓取的歌词写入 `Lyrics/song/<id>/`，用户歌词写入 `Lyrics/UserLyrics/<id>/`；歌曲、歌单和歌单成员元数据以 JSON 写入 `Metadata/<type>/<id>.metadata`。缓存以资源类型和网易云 ID 作为稳定身份，不依赖临时下载链接。
 
 封面和歌曲音频缓存默认不限制大小，可通过 `/cache [MB]` 设置上限（`/cache 0` 恢复不限制）。旧配置字段 `imageCacheMaxBytes` 会自动迁移为 `cacheMaxBytes`。歌词、元数据等 `other` 缓存不受该上限影响。`/clrcache` 不带参数时显示各分类大小并提供交互式清理；旧版按 URL 命名的 `image-cache` 文件会在能够确认归属时按需迁移。
 
@@ -224,7 +226,7 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 - `NCM_CLI_CONFIG_DIR`：自定义配置与数据缓存目录
 - `NCM_CLI_LOG_FILE`：自定义日志路径
 - `NCM_CLI_LOG_LEVEL`：`debug`、`info`、`warn` 或 `error`
-- `NCM_SMTC_SELF_CONTAINED=1`：构建独立运行的 Windows SMTC helper
+- `NCM_SMTC_HELPER`：覆盖 Windows SMTC/MediaPlayer helper 可执行文件路径
 
 普通播放时间偏移默认是 `0 ms`，同时作用于进度条、歌词、Credits EX 彩蛋和 SMTC 时间线。配置字段 `smtcOffsetMs` 的额外偏移只影响 SMTC；该字段继续兼容已有配置，但不再提供斜杠命令。两者范围均为 `-60000` 至 `60000 ms`。
 
@@ -237,7 +239,7 @@ data-cache/
 ├─ Covers/song/<id>.png
 ├─ Covers/playlist/<id>.png
 ├─ Musics/song/<id>.cache
-├─ Lyrics/song/<id>/
+├─ Lyrics/song/<id>/                 # 程序抓取的歌词缓存
 │  ├─ lyric.lrc       # 普通歌词
 │  ├─ lyric.lys       # Lyricify Syllable
 │  ├─ lyric.qrc       # QRC
@@ -245,30 +247,26 @@ data-cache/
 │  ├─ lyric.lqe       # LQE 聚合歌词
 │  ├─ trans.lrc       # 翻译
 │  └─ roman.lrc       # 音译
+├─ Lyrics/UserLyrics/<id>/           # 用户歌词，不会被清理命令删除
+│  ├─ 任意文件名.lrc                  # 主歌词，文件名不限
+│  ├─ trans.lrc                      # 可选翻译
+│  └─ roman.lrc                      # 可选音译
 └─ Metadata/<type>/<id>.metadata
 ```
 
-播放时歌词格式优先级为 `LQE > LYS > QRC > YRC > LRC`。其中 LQE 会提供原文、逐字信息和可选的翻译/音译；缺少的附加歌词会继续读取同目录下的 `trans.lrc` 和 `roman.lrc`。官方 JSON YRC 会从同一份 JSON 中提取 `lrc`、`yrc`、`ytlrc` 和 `yromalrc`，开头的 JSON 元数据行不会作为歌词显示。
+用户歌词优先于程序抓取的歌词缓存。主歌词格式优先级为 `LQE > LYS > QRC > YRC > LRC`；同一格式存在多个文件时，按文件名稳定排序，选择第一个能够解析出有效歌词行的文件。高优先级文件均无效时才会尝试下一格式。其中 LQE 会提供原文、逐字信息和可选的翻译/音译；官方 JSON YRC 会从同一份 JSON 中提取 `lrc`、`yrc`、`ytlrc` 和 `yromalrc`，开头的 JSON 元数据行不会作为歌词显示。
 
 ### 添加自定义歌词
 
 1. 找到歌曲 ID。例如歌曲链接 `https://music.163.com/#/song?id=1815533595` 的 ID 是 `1815533595`。
-2. 在 `data-cache/Lyrics/song/1815533595/` 下创建目录。
-3. 将歌词文件按固定文件名放入目录：`lyric.lrc`、`lyric.lys`、`lyric.qrc`、`lyric.yrc`、`lyric.lqe`、`trans.lrc` 或 `roman.lrc`。
-4. 保存后重新进入歌曲或切歌。播放器每次开始播放和歌单切歌时都会重新读取本地缓存。
+2. 在 `data-cache/Lyrics/UserLyrics/1815533595/` 下创建目录。
+3. 将扩展名为 `.lrc`、`.lys`、`.lqe`、`.yrc` 或 `.qrc` 的主歌词放入目录，主歌词文件名不限。
+4. 可选的翻译和音译必须分别命名为 `trans.lrc` 和 `roman.lrc`；`trans`、`roman` 这两个 basename 的其他格式文件也不会被当作主歌词。
+5. 保存后重新进入歌曲或切歌。也可以在歌曲详情页或播放器按 `i` 输入歌词路径，程序会用它替换该歌曲现有的用户主歌词、保留 `trans.lrc` 与 `roman.lrc`，再保存为 `imported.<格式>` 并立即应用；输入单独的 `q` 可取消导入。
 
-自定义文件应使用 UTF-8 编码。空文件会被忽略；高级格式无法解析出有效歌词行时会自动回退到下一种格式，最终回退到 `lyric.lrc`。歌词和元数据缓存不受 `/cache` 的封面/音频大小限制影响，可用 `/clrcache other` 清理。
+自定义文件应使用 UTF-8 编码。只扫描歌曲 ID 目录下的直接文件，子目录、未知扩展和空文件会被忽略。`/clrcache other` 会清理程序抓取的歌词和元数据，但完整保留 `Lyrics/UserLyrics`。在歌曲详情页或播放器的歌词导入提示中输入 `!delete`，可删除当前曲目的用户歌词并立即回退到抓取歌词。
 
 Credits EX 在经过普通播放偏移校准后的前 `46800 ms` 显示包含封面、歌曲信息和控制区的完整播放器，随后以逐行 CRT 刷新效果切入彩蛋动画；到 `130000 ms`（`2:10`）再以相同效果切回完整播放器。两次切换约持续 1.5 秒，画面从上往下交叠替换，各行快速闪烁数次后稳定。该曲目在普通播放器和彩蛋阶段都只显示当前歌词及其翻译，不显示未播放歌词。
-
-## 测试
-
-```bash
-npm test
-npm run test:live
-```
-
-`npm test` 不访问网络；`npm run test:live` 会连接已配置的 API 服务。
 
 ## 日志
 

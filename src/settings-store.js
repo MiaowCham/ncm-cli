@@ -10,6 +10,7 @@ export const DEFAULT_IMAGE_PROTOCOL = 'auto';
 export const DEFAULT_LYRIC_OFFSET_MS = 0;
 export const DEFAULT_SMTC_OFFSET_MS = 0;
 export const DEFAULT_SEARCH_LIMIT = 30;
+export const DEFAULT_TRANSLATION_MODE = 'off';
 export const DEFAULT_CACHE_MAX_BYTES = null;
 export const MAX_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024;
 export const DEFAULT_IMAGE_CACHE_MAX_BYTES = DEFAULT_CACHE_MAX_BYTES;
@@ -54,6 +55,8 @@ export async function loadSettings(file = settingsFilePath()) {
       lyricOffsetMs: validLyricOffset(data.lyricOffsetMs) ? data.lyricOffsetMs : DEFAULT_LYRIC_OFFSET_MS,
       smtcOffsetMs: validLyricOffset(data.smtcOffsetMs) ? data.smtcOffsetMs : DEFAULT_SMTC_OFFSET_MS,
       searchLimit: validSearchLimit(data.searchLimit) ? data.searchLimit : DEFAULT_SEARCH_LIMIT,
+      translationMode: ['off', 'translated', 'romanized'].includes(data.translationMode)
+        ? data.translationMode : DEFAULT_TRANSLATION_MODE,
       apiBaseUrl
     };
     const keys = Object.keys(settings);
@@ -75,6 +78,7 @@ export async function loadSettings(file = settingsFilePath()) {
         lyricOffsetMs: DEFAULT_LYRIC_OFFSET_MS,
         smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS,
         searchLimit: DEFAULT_SEARCH_LIMIT,
+        translationMode: DEFAULT_TRANSLATION_MODE,
         apiBaseUrl: null
       };
       if (error instanceof SyntaxError) await writeSettingsFile(defaults, file);
@@ -112,6 +116,9 @@ export async function saveSettings(settings, file = settingsFilePath()) {
   }
   if (!validSearchLimit(next.searchLimit)) {
     throw new Error(`搜索返回数量必须是 ${MIN_SEARCH_LIMIT} 到 ${MAX_SEARCH_LIMIT} 之间的整数`);
+  }
+  if (!['off', 'translated', 'romanized'].includes(next.translationMode)) {
+    throw new Error(`不支持的歌词翻译模式：${next.translationMode}`);
   }
   if (next.apiBaseUrl != null) next.apiBaseUrl = normalizeApiBaseUrl(next.apiBaseUrl);
   return writeSettingsFile(next, file);

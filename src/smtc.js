@@ -9,6 +9,7 @@ const PROTOCOL_VERSION = 1;
 const DEFAULT_READY_TIMEOUT_MS = 3000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1000;
 const DEFAULT_MAX_LINE_BYTES = 64 * 1024;
+const DEFAULT_COMMAND_TIMEOUT_MS = 15000;
 const CONTROL_ACTIONS = new Set([
   'play',
   'pause',
@@ -87,11 +88,15 @@ function helperSpec(helperCommand) {
   const candidates = [
     path.join(root, 'publish', runtime, 'ncm-cli-smtc-bridge.exe'),
     path.join(root, 'ncm-cli-smtc-bridge.exe'),
-    path.join(root, 'bin', 'Release', 'net8.0-windows10.0.19041.0', runtime, 'publish', 'ncm-cli-smtc-bridge.exe'),
-    path.join(root, 'bin', 'Debug', 'net8.0-windows10.0.19041.0', 'ncm-cli-smtc-bridge.exe')
   ];
   const executable = candidates.find((candidate) => existsSync(candidate)) || candidates[0];
   return { command: executable, args: [] };
+}
+
+export function hasSmtcHelper({ platform = process.platform } = {}) {
+  if (platform !== 'win32') return false;
+  if (process.env.NCM_SMTC_HELPER) return true;
+  return existsSync(helperSpec().command);
 }
 
 function waitForChildExit(child, timeoutMs) {
@@ -129,6 +134,9 @@ export async function createSmtcBridge({
   hasPlaylist,
   canPrevious,
   canNext,
+  mode = 'smtc-only',
+  onPlayerEvent = () => {},
+  commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
   sessionId = randomUUID()
 } = {}) {
   if (platform !== 'win32') return noOpBridge(sessionId);
@@ -150,15 +158,27 @@ export async function createSmtcBridge({
   let ready = false;
   let closed = false;
   let revision = 0;
+  let commandId = 0;
+  let generation = 0;
   let buffered = Buffer.alloc(0);
   let droppingOversizedLine = false;
   const requestIds = new Set();
   const requestOrder = [];
+  const pendingCommands = new Map();
+
+  const rejectPendingCommands = (error) => {
+    for (const pending of pendingCommands.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    pendingCommands.clear();
+  };
 
   const markUnavailable = (reason, error) => {
     if (!alive) return;
     alive = false;
     ready = false;
+    rejectPendingCommands(error instanceof Error ? error : new Error(`MediaPlayer helper 不可用：${reason}`));
     log(logger, 'warn', 'smtc_unavailable', { reason, error });
   };
 
@@ -195,6 +215,26 @@ export async function createSmtcBridge({
     if (message.type === 'ready') {
       ready = true;
       finishStartup(true);
+      return;
+    }
+    if (message.type === 'error' && !ready) {
+      log(logger, 'warn', 'smtc_initialize_failed', { error: message.message });
+      finishStartup(false);
+      return;
+    }
+    if ((message.type === 'ack' || message.type === 'error') && message.commandId != null) {
+      const pending = pendingCommands.get(String(message.commandId));
+      if (!pending) return;
+      pendingCommands.delete(String(message.commandId));
+      clearTimeout(pending.timer);
+      if (message.type === 'error') pending.reject(new Error(message.message || `${pending.command} 命令失败`));
+      else pending.resolve(message);
+      return;
+    }
+    if (message.type === 'player_event' && mode === 'media-player') {
+      const eventGeneration = Number.isInteger(message.generation) ? message.generation : generation;
+      try { onPlayerEvent(message, eventGeneration); }
+      catch (error) { log(logger, 'warn', 'media_player_event_failed', { event: message.event, error }); }
       return;
     }
     if (message.type !== 'control' || !ready || !CONTROL_ACTIONS.has(message.action)) return;
@@ -269,6 +309,7 @@ export async function createSmtcBridge({
 
   write({
     type: 'initialize',
+    mode,
     controls: {
       play: true, pause: true, stop: true, seek: true, rewind: true, fastForward: true,
       ...currentControls
@@ -289,9 +330,28 @@ export async function createSmtcBridge({
   write({ type: 'controls', ...currentControls });
   write({ type: 'metadata', ...currentMetadata });
 
+  const request = (command, details = {}) => {
+    const nextId = ++commandId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingCommands.delete(String(nextId));
+        reject(new Error(`MediaPlayer 命令响应超时：${command}`));
+      }, commandTimeoutMs);
+      pendingCommands.set(String(nextId), { command, resolve, reject, timer });
+      if (!write({ type: command, commandId: nextId, ...details })) {
+        clearTimeout(timer);
+        pendingCommands.delete(String(nextId));
+        reject(new Error('MediaPlayer helper 不可用'));
+      }
+    });
+  };
+
   return {
     get available() { return alive && ready && !closed; },
+    get generation() { return generation; },
+    capabilities: Object.freeze({ pause: true, seek: true, volume: true, load: mode === 'media-player' }),
     sessionId,
+    initialize: async () => true,
     async setMetadata(overrides = {}) {
       currentMetadata = metadataFrom(currentMetadata, durationMs, coverPath, overrides);
       return write({ type: 'metadata', ...currentMetadata });
@@ -322,6 +382,31 @@ export async function createSmtcBridge({
         rate: Number.isFinite(Number(rate)) && Number(rate) > 0 ? Number(rate) : 1
       });
     },
+    async load(url, { positionMs = 0, volume = 100, durationMs: nextDuration, metadata = {} } = {}) {
+      if (mode !== 'media-player') throw new Error('当前 SMTC bridge 未启用 MediaPlayer 模式');
+      if (!url) throw new Error('播放地址不能为空');
+      generation += 1;
+      await this.setMetadata({ ...metadata, durationMs: nextDuration });
+      await request('load', {
+        url: String(url),
+        positionMs: finiteInteger(positionMs),
+        volume: Math.min(100, Math.max(0, Number(volume) || 0))
+      });
+      return generation;
+    },
+    pause() { return request('pause'); },
+    resume() { return request('play'); },
+    seekAbsolute(seconds) {
+      const value = Number(seconds);
+      if (!Number.isFinite(value) || value < 0) throw new Error('跳转位置必须是非负数');
+      return request('seek', { positionMs: Math.round(value * 1000) });
+    },
+    setVolume(volume) {
+      const value = Number(volume);
+      if (!Number.isFinite(value)) throw new Error('音量必须是数字');
+      return request('volume', { volume: Math.min(100, Math.max(0, value)) });
+    },
+    stop() { return request('stop'); },
     async close() {
       if (closed) return;
       if (alive && ready) write({ type: 'shutdown' });
@@ -334,6 +419,7 @@ export async function createSmtcBridge({
         await waitForChildExit(child, Math.min(250, closeTimeoutMs));
       }
       alive = false;
+      rejectPendingCommands(new Error('MediaPlayer helper 已关闭'));
     }
   };
 }

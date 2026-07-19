@@ -37,7 +37,10 @@ export async function loadCachedImage(source, {
   logger = null,
   fetchImpl = fetch,
   identity = null,
-  legacyDirectory = legacyImageCacheDirectory()
+  legacyDirectory = legacyImageCacheDirectory(),
+  revalidate = false,
+  forceRevalidate = false,
+  onUpdated = null
 } = {}) {
   const parsed = new URL(source);
   if (parsed.protocol !== 'https:') throw new Error('只加载 HTTPS 图片');
@@ -47,6 +50,9 @@ export async function loadCachedImage(source, {
     maxBytes,
     directory,
     logger,
+    revalidate,
+    forceRevalidate,
+    onUpdated,
     legacyFiles: [path.join(legacyDirectory, `${legacyCacheKey(source)}.img`)],
     validate: (buffer) => buffer.length <= MAX_IMAGE_BYTES,
     loader: async () => {
