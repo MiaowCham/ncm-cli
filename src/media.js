@@ -1668,8 +1668,16 @@ export async function playWithProgress({
   let volume = 100;
   let userPaused = false;
   let hasTranslation = lyrics.some((line) => Boolean(line.translation));
+  let preferredTranslationMode = 'off';
   let showTranslation = false;
   let showRomanized = false;
+  const applyPreferredTranslation = () => {
+    const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+    showTranslation = preferredTranslationMode === 'translated' ? hasTranslation
+      : preferredTranslationMode === 'romanized' ? !hasRomanized && hasTranslation : false;
+    showRomanized = preferredTranslationMode === 'romanized' ? hasRomanized
+      : preferredTranslationMode === 'translated' ? !hasTranslation && hasRomanized : false;
+  };
   let indicator = '';
   let indicatorUntil = 0;
   let favoritePending = false;
@@ -2522,8 +2530,7 @@ export async function playWithProgress({
     );
     hasTranslation = lyrics.some((line) => Boolean(line.translation));
     const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
-    showTranslation = false;
-    showRomanized = false;
+    applyPreferredTranslation();
     playlistCurrentIndex = resolvedIndex;
     if (!sameTrack && cause !== 'history') playHistory.push(resolvedIndex);
     playbackPlaylist.currentIndex = resolvedIndex;
@@ -2878,6 +2885,7 @@ export async function playWithProgress({
       } else {
         showRomanized = true;
       }
+      preferredTranslationMode = showRomanized ? 'romanized' : showTranslation ? 'translated' : 'off';
       setIndicator(showRomanized ? '音译已开启' : showTranslation ? '翻译已开启' : '翻译已关闭');
       render();
     }
