@@ -439,17 +439,24 @@ export function lyricViewport(lines, elapsedMs, capacity) {
   }));
 }
 
-export function attachLyricTranslations(originalLines, translatedLines) {
+export function attachLyricTranslations(originalLines, translatedLines, romanizedLines = []) {
   const translations = new Map();
   for (const line of translatedLines) {
     const texts = translations.get(line.timeMs) || [];
     if (!texts.includes(line.text)) texts.push(line.text);
     translations.set(line.timeMs, texts);
   }
-  return originalLines.map((line) => ({
-    ...line,
-    translation: (translations.get(line.timeMs) || []).filter((text) => text !== line.text).join(' / ')
-  }));
+  const romanized = new Map();
+  for (const line of romanizedLines) romanized.set(line.timeMs, line.text);
+  return originalLines.map((line) => {
+    const value = {
+      ...line,
+      translation: (translations.get(line.timeMs) || []).filter((text) => text !== line.text).join(' / ')
+    };
+    const romanizedText = romanized.get(line.timeMs);
+    if (romanizedText) value.romanized = romanizedText;
+    return value;
+  });
 }
 
 export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation, width = Infinity, currentOnly = false) {
@@ -520,8 +527,8 @@ export function shuffledPlaylistOrder(length, currentIndex, random = Math.random
   return length ? [currentIndex, ...rest] : [];
 }
 
-export function playbackShortcutText({ canFavorite = false, favorited = false } = {}) {
-  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译  r 刷新';
+export function playbackShortcutText({ canFavorite = false, favorited = false, canToggleTranslation = true } = {}) {
+  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? '  t 译/音' : ''}  r 刷新`;
   return canFavorite ? `${base}  f ${favorited ? '取消收藏' : '收藏'}` : base;
 }
 
@@ -912,6 +919,7 @@ function renderDynamic({
   dynamicRow,
   dynamicAnchored,
   showTranslation,
+  showRomanized = false,
   indicator,
   playlist,
   playlistOpen,
@@ -921,6 +929,8 @@ function renderDynamic({
   easterEgg = null,
   canFavorite = false,
   favorited = false,
+  translationMode = 'off',
+  canToggleTranslation = true,
   replacePausedContent = false,
   compactPausedRow = '',
   compactPausedArtist = '',
@@ -953,7 +963,14 @@ function renderDynamic({
         playlistOpen: playbackModeText.playlistOpen
       }, columns).map((row) => chalk.magentaBright(row))
     : [];
-  const shortcutRows = playbackShortcutRows({ canFavorite, favorited }, columns).map((row) => chalk.cyanBright(row));
+  const shortcutRows = playbackShortcutRows({ canFavorite, favorited, canToggleTranslation }, columns).map((row) => {
+    const label = translationMode === 'off'
+      ? chalk.gray('译/音')
+      : translationMode === 'translated'
+        ? `${chalk.cyanBright('译')}${chalk.gray('/音')}`
+        : `${chalk.gray('译/')}\x1b[1m${chalk.cyanBright('音')}`;
+    return chalk.cyanBright(row.replace('t 译/音', `t ${label}`));
+  });
   if (playlistOpen) {
     const outputRows = playbackPlaylistOverlayRows({
       playlist,
@@ -976,8 +993,11 @@ function renderDynamic({
     requiredContentRows = frameRows.slice(0, 1);
     optionalSuffixRows = frameRows.slice(1);
   } else {
+    const displayLyrics = showRomanized
+      ? lyrics.map((line) => ({ ...line, translation: line.romanized || '' }))
+      : lyrics;
     const displayRows = playbackLyricRows(
-      lyrics, lyricElapsedMs, rows, showTranslation, columns, currentLyricOnly
+      displayLyrics, lyricElapsedMs, rows, showTranslation || showRomanized, columns, currentLyricOnly
     );
     const lyricRows = displayRows.length
       ? displayRows.map((line) => {
@@ -1548,6 +1568,7 @@ export async function playWithProgress({
   durationMs,
   lyricSource = '',
   translatedLyricSource = '',
+  romanizedLyricSource = '',
   lyricOffsetMs = 0,
   smtcOffsetMs = 0,
   playerBackend = 'auto',
@@ -1560,6 +1581,7 @@ export async function playWithProgress({
   onInterrupt,
   onTrackChange,
   onFavorite,
+  favorited = false,
   returnPageRows = []
 }) {
   let releaseScreen = () => {};
@@ -1582,7 +1604,7 @@ export async function playWithProgress({
   let activeSong = song;
   let activeUrl = url;
   let activeDurationMs = durationMs;
-  let lyrics = attachLyricTranslations(parseLrc(lyricSource), parseLrc(translatedLyricSource));
+  let lyrics = attachLyricTranslations(parseLrc(lyricSource), parseLrc(translatedLyricSource), parseLrc(romanizedLyricSource));
   let clock = createPlaybackClock(activeDurationMs);
   // 创建 bridge、下载封面等准备工作不应计入真实播放位置。
   clock.pause();
@@ -1592,11 +1614,12 @@ export async function playWithProgress({
   let volume = 100;
   let userPaused = false;
   let hasTranslation = lyrics.some((line) => Boolean(line.translation));
-  let showTranslation = hasTranslation;
+  let showTranslation = false;
+  let showRomanized = false;
   let indicator = '';
   let indicatorUntil = 0;
   let favoritePending = false;
-  const favoritedSongIds = new Set();
+  const favoritedSongIds = new Set(favorited && activeSong?.id != null ? [String(activeSong.id)] : []);
   const playlistTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
   let playlistCurrentIndex = playlistTracks.length
     ? clamp(Math.floor(Number(playlist?.currentIndex) || 0), 0, playlistTracks.length - 1)
@@ -1835,6 +1858,9 @@ export async function playWithProgress({
       paused: userPaused,
       lyrics,
       showTranslation,
+      showRomanized,
+      translationMode: showRomanized ? 'romanized' : showTranslation ? 'translated' : 'off',
+      canToggleTranslation: lyrics.some((line) => Boolean(line.translation || line.romanized)),
       indicator,
       playlist: playbackPlaylist,
       playlistOpen,
@@ -1959,6 +1985,7 @@ export async function playWithProgress({
       paused: true,
       lyrics,
       showTranslation,
+      showRomanized,
       indicator,
       playlist: playbackPlaylist,
       playlistOpen: false,
@@ -2134,6 +2161,7 @@ export async function playWithProgress({
       paused: userPaused,
       lyrics,
       showTranslation,
+      showRomanized,
       indicator,
       playlist: playbackPlaylist,
       playlistOpen: false,
@@ -2421,6 +2449,9 @@ export async function playWithProgress({
       ? clamp(next.index, 0, playlistTracks.length - 1)
       : targetIndex;
     activeSong = next.song;
+    const nextSongId = String(activeSong?.id ?? '');
+    if (next.favorited) favoritedSongIds.add(nextSongId);
+    else favoritedSongIds.delete(nextSongId);
     activeOffsetMs = trackOffset.reset();
     creditsFullPlayerActive = false;
     creditsPlayerHeaderRows = [];
@@ -2429,10 +2460,13 @@ export async function playWithProgress({
     activeDurationMs = Math.max(0, Number(next.durationMs ?? next.song.durationMs) || 0);
     lyrics = Array.isArray(next.lyrics) ? next.lyrics : attachLyricTranslations(
       parseLrc(next.lyricSource ?? next.lyrics?.original ?? ''),
-      parseLrc(next.translatedLyricSource ?? next.lyrics?.translated ?? '')
+      parseLrc(next.translatedLyricSource ?? next.lyrics?.translated ?? ''),
+      parseLrc(next.romanizedLyricSource ?? next.lyrics?.romanized ?? '')
     );
     hasTranslation = lyrics.some((line) => Boolean(line.translation));
-    showTranslation = hasTranslation;
+    const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+    showTranslation = false;
+    showRomanized = false;
     playlistCurrentIndex = resolvedIndex;
     if (!sameTrack && cause !== 'history') playHistory.push(resolvedIndex);
     playbackPlaylist.currentIndex = resolvedIndex;
@@ -2772,9 +2806,22 @@ export async function playWithProgress({
       return;
     }
     if (action.type === 'toggle_translation') {
-      const next = toggleTranslationState(showTranslation, hasTranslation);
-      showTranslation = next.showTranslation;
-      setIndicator(next.indicator);
+      const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+      if (!hasTranslation && !hasRomanized) return;
+      if (showRomanized) {
+        showRomanized = false;
+        showTranslation = hasTranslation;
+      } else if (showTranslation && hasRomanized) {
+        showTranslation = false;
+        showRomanized = true;
+      } else if (showTranslation) {
+        showTranslation = false;
+      } else if (hasTranslation) {
+        showTranslation = true;
+      } else {
+        showRomanized = true;
+      }
+      setIndicator(showRomanized ? '音译已开启' : showTranslation ? '翻译已开启' : '翻译已关闭');
       render();
     }
   };

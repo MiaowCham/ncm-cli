@@ -100,8 +100,8 @@ export async function cacheSongMusic(id, source, options = {}) {
     return null;
   }
   const parsed = new URL(source);
-  if (parsed.protocol !== 'https:') {
-    void options.logger?.info('song_cache_bypassed', { songId: id, reason: 'non_https', protocol: parsed.protocol });
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    void options.logger?.info('song_cache_bypassed', { songId: id, reason: 'unsupported_protocol', protocol: parsed.protocol });
     return source;
   }
   const buffer = await loadCachedData({ type: 'song-music', id }, {

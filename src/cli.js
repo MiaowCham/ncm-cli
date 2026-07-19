@@ -767,12 +767,21 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     if (isAbortError(error)) throw error;
     void logger.warn('song_cache_failed', { songId: song.id, error });
   }
+  let favorited = false;
+  if (authState.loggedIn) {
+    const uid = authState.profile?.userId || authState.account?.id;
+    if (uid) favorited = await api.isSongLiked(uid, song.id, {
+      signal, username: authState.profile?.nickname
+    });
+  }
   await playWithProgress({
     song,
     url: playbackUrl,
     durationMs: song.durationMs,
     lyricSource: lyrics.original,
     translatedLyricSource: lyrics.translated,
+    romanizedLyricSource: lyrics.romanized,
+    favorited,
     lyricOffsetMs: context.settings.lyricOffsetMs,
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
@@ -1092,7 +1101,15 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
         url: playbackUrl,
         durationMs: song.durationMs,
         lyricSource: lyrics.original,
-        translatedLyricSource: lyrics.translated
+        translatedLyricSource: lyrics.translated,
+        romanizedLyricSource: lyrics.romanized,
+        favorited: context.authState.loggedIn
+          ? await api.isSongLiked(
+              context.authState.profile?.userId || context.authState.account?.id,
+              song.id,
+              { username: context.authState.profile?.nickname }
+            )
+          : false
       };
     })().then((payload) => {
       if (!payload) cache.delete(index);
