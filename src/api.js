@@ -247,8 +247,8 @@ export class NcmApi {
       return {
         original: data.lrc?.lyric || '', translated: data.ytlrc?.lyric || data.tlyric?.lyric || '',
         romanized: data.yromalrc?.lyric || data.romalrc?.lyric || '',
-        // 网易接口通常将逐字歌词命名为 klyric，部分兼容服务使用 yrc。
-        yrc: data.yrc?.lyric || data.klyric?.lyric || ''
+        // 保存完整 /lyric/new JSON，读取时再提取各歌词轨道。
+        yrc: JSON.stringify(data)
       };
     }, this.cacheOptions(options));
   }

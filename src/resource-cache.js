@@ -50,12 +50,6 @@ export async function loadCachedLyrics(id, loader, options = {}) {
       const file = dataCachePath({ type, id }, options.directory);
       const value = await readFile(file, 'utf8');
       if (value.length > 0) {
-        if (type === 'song-lyrics-yrc') {
-          try {
-            const payload = JSON.parse(value);
-            if (payload?.yrc?.lyric) return payload.yrc.lyric;
-          } catch { /* 原始 YRC 文本 */ }
-        }
         return value;
       }
     } catch (error) {
@@ -74,9 +68,19 @@ export async function loadCachedLyrics(id, loader, options = {}) {
   }
   if (local.lys || local.qrc || local.yrc) {
     const original = await readLocal('song-lyrics');
-    const translated = await readLocal('song-lyrics-translated');
-    const romanized = await readLocal('song-lyrics-romanized');
-    return { original: original || '', translated: translated || '', romanized: romanized || '', ...local };
+    let translated = await readLocal('song-lyrics-translated');
+    let romanized = await readLocal('song-lyrics-romanized');
+    let embeddedOriginal = '';
+    if (local.yrc) {
+      try {
+        const payload = JSON.parse(local.yrc);
+        const source = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+        embeddedOriginal = source?.lrc?.lyric || '';
+        if (!translated) translated = source?.ytlrc?.lyric || source?.tlyric?.lyric || '';
+        if (!romanized) romanized = source?.yromalrc?.lyric || source?.romalrc?.lyric || '';
+      } catch { /* 兼容纯文本 YRC */ }
+    }
+    return { original: original || embeddedOriginal, translated: translated || '', romanized: romanized || '', ...local };
   }
   const loadTrack = async (type, field) => {
     const local = await readLocal(type);
