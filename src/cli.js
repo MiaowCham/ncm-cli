@@ -244,8 +244,9 @@ async function showSong(
   let transitionCoverRows = [];
   const coverRows = song.cover
     ? await tryRenderImage(song.cover, {
-        signal,
-        size: 'detail',
+      signal,
+      size: 'detail',
+      shouldRender: pageState.shouldRender,
         protocol: imageProtocol,
         logger,
         diagnosticContext: 'song_detail',
@@ -260,6 +261,7 @@ async function showSong(
           : undefined
       })
     : 0;
+  if (pageState.shouldRender && !pageState.shouldRender()) return [];
   const metadataLines = songDetailMetadataLines(song);
   console.log(chalk.bold.green(metadataLines[0]));
   console.log(metadataLines.slice(1).join('\n'));
@@ -1037,7 +1039,7 @@ async function openDetailPage(rl, render, prompt, keys, context) {
     let transitionBodyRows = [];
     let redrawCount = 0;
     let promptActive = false;
-    const promptText = typeof prompt === 'function' ? prompt() : prompt;
+    const promptText = () => typeof prompt === 'function' ? prompt() : prompt;
     const redraw = async (state = {}) => {
       const generation = ++renderGeneration;
       const renderStartedAt = Date.now();
@@ -1050,14 +1052,15 @@ async function openDetailPage(rl, render, prompt, keys, context) {
       try {
         const renderedRows = await render({
           ...state,
+          shouldRender: () => !closed && generation === renderGeneration,
           onImageReady: (preloadedCoverBuffer) => {
             if (closed || generation !== renderGeneration) return;
             void redraw({ reason: 'image_ready', preloadedCoverBuffer }).then(() => {
-              if (!closed && promptActive) output.write(promptText);
+              if (!closed && promptActive) output.write(promptText());
             }).catch(() => {});
           }
         });
-        if (Array.isArray(renderedRows)) transitionBodyRows = renderedRows;
+        if (generation === renderGeneration && Array.isArray(renderedRows)) transitionBodyRows = renderedRows;
         void context.logger?.info('detail_render_completed', {
           reason, status: 'success', durationMs: Date.now() - renderStartedAt,
           bodyRows: Array.isArray(renderedRows) ? renderedRows.length : null,
@@ -1079,7 +1082,7 @@ async function openDetailPage(rl, render, prompt, keys, context) {
       close,
       tty,
       bodyRows: transitionBodyRows,
-      transitionRows: detailPageTransitionRows(transitionBodyRows, promptText)
+      transitionRows: detailPageTransitionRows(transitionBodyRows, promptText())
     };
   } catch (error) {
     close();
@@ -1358,6 +1361,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
     const coverRows = cover ? await tryRenderImage(cover, {
       signal: context.signal,
       size: 'detail',
+      shouldRender: pageState.shouldRender,
       protocol: context.settings.imageProtocol,
       logger: context.logger,
       diagnosticContext: 'playlist_detail',
@@ -1369,6 +1373,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
       onDeferredReady: pageState.onImageReady,
       onTextRows: (rows) => { transitionCoverRows = rows; }
     }) : 0;
+    if (pageState.shouldRender && !pageState.shouldRender()) return [];
     forceCoverRefresh = false;
     const transitionRows = [
       '',
