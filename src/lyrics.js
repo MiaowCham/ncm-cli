@@ -1,7 +1,7 @@
 const TIME_TAG = /\[(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?(?:\.(\d{1,3}))?\]/g;
 
 const SYLLABLE_LINE = /^\[(\d+),(\d+)\](.*)$/;
-const SYLLABLE_TOKEN = /(.*?)\((\d+),(\d+)\)/g;
+const SYLLABLE_TOKEN = /(.*?)\((\d+),(\d+)(?:,\d+)?\)/g;
 
 function tagTimeMs(tag, offset) {
   const major = Number(tag[1]);
@@ -47,8 +47,8 @@ function parseSyllableLines(source = '') {
     const syllables = [];
     let token;
     const body = match[3];
-    if (/^\(\d+,\d+\)/.test(body)) {
-      const yrcToken = /\((\d+),(\d+)\)([^()]*)/g;
+    if (/^\(\d+,\d+(?:,\d+)?\)/.test(body)) {
+      const yrcToken = /\((\d+),(\d+)(?:,\d+)?\)([^()]*)/g;
       while ((token = yrcToken.exec(body))) {
         const start = Number(token[1]);
         syllables.push({ text: token[3], startTime: start, endTime: start + Number(token[2]) });
