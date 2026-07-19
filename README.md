@@ -262,6 +262,7 @@ npm run test:live
 - [mpv](https://mpv.io/)
 - [VLC](https://www.videolan.org/vlc/)
 - [FFmpeg / ffplay](https://ffmpeg.org/)
+- 歌词 QRC、YRC、Lyricify Syllable 解析思路参考 [WXRIW/Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper)
 - Credits EX 彩蛋移植自 MIT 项目 [frums-credits-cli-nosound](https://github.com/sititou70/frums-credits-cli-nosound)：保留原始 CSF 分镜与文本素材并实现兼容播放器，不包含其静音占位音频；详细归属见 [`assets/credits-csf/NOTICE.md`](assets/credits-csf/NOTICE.md)。
 - `NCM Credits VGA16` 字体改编自 Dimitar Toshkov Zhekov 创作的 Terminus Font，并通过 Ubuntu/Debian `console-setup` 分发；详细归属见 [`assets/fonts/NOTICE.md`](assets/fonts/NOTICE.md)。
 
