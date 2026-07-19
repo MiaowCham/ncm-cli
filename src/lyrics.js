@@ -81,10 +81,17 @@ export function chooseLyricSource(input = {}) {
   const qrc = typeof input?.qrc === 'string' ? input.qrc : '';
   const yrc = typeof input?.yrc === 'string' ? input.yrc : '';
   const original = typeof input?.original === 'string' ? input.original : '';
-  if (lys.trim()) return { source: lys, type: 'lys', lines: parseLyricifySyllable(lys) };
-  if (qrc.trim()) return { source: qrc, type: 'qrc', lines: parseQrc(qrc) };
-  if (yrc.trim()) return { source: yrc, type: 'yrc', lines: parseYrc(yrc) };
-  return { source: original, type: 'lrc', lines: parseLrc(original) };
+  for (const [type, source, parse] of [
+    ['lys', lys, parseLyricifySyllable],
+    ['qrc', qrc, parseQrc],
+    ['yrc', yrc, parseYrc],
+    ['lrc', original, parseLrc]
+  ]) {
+    if (!source.trim()) continue;
+    const lines = parse(source);
+    if (lines.length) return { source, type, lines };
+  }
+  return { source: '', type: 'lrc', lines: [] };
 }
 
 export function currentLyric(lines, elapsedMs) {

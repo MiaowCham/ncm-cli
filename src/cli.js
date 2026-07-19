@@ -763,7 +763,11 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
   const selectedLyrics = chooseLyricSource(lyrics);
   void logger.info('lyrics_source_selected', {
     songId: song.id, type: selectedLyrics.type,
-    lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || '')
+    lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || ''),
+    available: Object.fromEntries(['lys', 'qrc', 'yrc', 'original'].map((key) => [
+      key, { bytes: typeof lyrics?.[key] === 'string' ? Buffer.byteLength(lyrics[key]) : 0,
+        parsedLines: typeof lyrics?.[key] === 'string' ? chooseLyricSource({ [key]: lyrics[key] }).lines.length : 0 }
+    ]))
   });
   if (!playbackUrl) try {
     playbackUrl = await cacheSongMusic(song.id, result.url, {
@@ -1097,7 +1101,11 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
       const selectedLyrics = chooseLyricSource(lyrics);
       void context.logger.info('lyrics_source_selected', {
         songId: song.id, type: selectedLyrics.type,
-        lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || '')
+        lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || ''),
+        available: Object.fromEntries(['lys', 'qrc', 'yrc', 'original'].map((key) => [
+          key, { bytes: typeof lyrics?.[key] === 'string' ? Buffer.byteLength(lyrics[key]) : 0,
+            parsedLines: typeof lyrics?.[key] === 'string' ? chooseLyricSource({ [key]: lyrics[key] }).lines.length : 0 }
+        ]))
       });
       if (!playbackUrl) try {
         playbackUrl = await cacheSongMusic(song.id, result.url, {
