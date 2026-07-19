@@ -14,8 +14,6 @@ jobs:
   tests-and-audit:
     name: 测试与依赖审计
     runs-on: ubuntu-latest
-    env:
-      NCM_CLI_CONFIG_DIR: ${{ runner.temp }}/ncm-cli-config
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -27,9 +25,11 @@ jobs:
       - name: 安装依赖
         run: npm ci
       - name: 运行测试
+        env:
+          NCM_CLI_CONFIG_DIR: ${{ runner.temp }}/ncm-cli-config
         run: npm test
       - name: 依赖安全审计
-        if: ${{ always() }}
+        if: always()
         run: npm audit --omit=dev
 
   codeql:
