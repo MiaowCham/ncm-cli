@@ -104,6 +104,8 @@ id 347230
 | `/offset [毫秒]` | 查看或设置播放时间偏移 |
 | `/api [url]` | 查看或更换 API 地址 |
 | `/clear` | 清空终端内容 |
+| `/cache [MB]` | 查看或设置整体缓存上限 |
+| `/clrcache [covers\|musics\|other]` | 查看或分类清理本地缓存 |
 
 播放器后端支持 `auto`、`mpv`、`vlc`、`ffplay`；图片协议支持 `auto`、`sixel`、`kitty`、`iterm2`、`symbols`、`ansi`、`none`。
 
@@ -214,7 +216,9 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 
 默认配置存放在操作系统的用户配置目录，可通过 `NCM_CLI_CONFIG_DIR` 修改位置。
 
-曲目封面和歌单封面保存在同一配置目录下的 `data-cache` 中，路径分别为 `Covers/song/<id>.png` 和 `Covers/playlist/<id>.png`。缓存以资源类型、网易云 ID 和内容变体作为稳定身份，不依赖临时下载链接；链接签名或 CDN 路径刷新后仍会复用已有内容。未来曲目数据和歌词可扩展为 `Musics/song/<id>.cache`、`Lyrics/song/<id>.lrc`。旧版按 URL 命名的 `image-cache` 文件会在能够确认归属时按需迁移。
+曲目封面和歌单封面保存在同一配置目录下的 `data-cache` 中，路径分别为 `Covers/song/<id>.png` 和 `Covers/playlist/<id>.png`。歌曲音频写入 `Musics/song/<id>.cache`，歌词写入 `Lyrics/song/<id>.lrc`，歌曲、歌单和歌单成员元数据以 JSON 写入 `Metadata/<type>/<id>.metadata`。缓存以资源类型和网易云 ID 作为稳定身份，不依赖临时下载链接。
+
+封面和歌曲音频缓存默认不限制大小，可通过 `/cache [MB]` 设置上限（`/cache 0` 恢复不限制）。旧配置字段 `imageCacheMaxBytes` 会自动迁移为 `cacheMaxBytes`。歌词、元数据等 `other` 缓存不受该上限影响。`/clrcache` 不带参数时显示各分类大小并提供交互式清理；旧版按 URL 命名的 `image-cache` 文件会在能够确认归属时按需迁移。
 
 - `NCM_API_BASE_URL`：临时覆盖 API 地址
 - `NCM_CLI_CONFIG_DIR`：自定义配置与数据缓存目录
@@ -223,6 +227,38 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 - `NCM_SMTC_SELF_CONTAINED=1`：构建独立运行的 Windows SMTC helper
 
 普通播放时间偏移默认是 `0 ms`，同时作用于进度条、歌词、Credits EX 彩蛋和 SMTC 时间线。配置字段 `smtcOffsetMs` 的额外偏移只影响 SMTC；该字段继续兼容已有配置，但不再提供斜杠命令。两者范围均为 `-60000` 至 `60000 ms`。
+
+## 缓存与自定义歌词
+
+缓存根目录是配置目录下的 `data-cache`。歌曲相关缓存按网易云歌曲 ID 存放，不依赖会变化的下载链接：
+
+```text
+data-cache/
+├─ Covers/song/<id>.png
+├─ Covers/playlist/<id>.png
+├─ Musics/song/<id>.cache
+├─ Lyrics/song/<id>/
+│  ├─ lyric.lrc       # 普通歌词
+│  ├─ lyric.lys       # Lyricify Syllable
+│  ├─ lyric.qrc       # QRC
+│  ├─ lyric.yrc       # YRC；官方版本可保存完整 /lyric/new JSON
+│  ├─ lyric.lqe       # LQE 聚合歌词
+│  ├─ trans.lrc       # 翻译
+│  └─ roman.lrc       # 音译
+└─ Metadata/<type>/<id>.metadata
+```
+
+播放时歌词格式优先级为 `LQE > LYS > QRC > YRC > LRC`。其中 LQE 会提供原文、逐字信息和可选的翻译/音译；缺少的附加歌词会继续读取同目录下的 `trans.lrc` 和 `roman.lrc`。官方 JSON YRC 会从同一份 JSON 中提取 `lrc`、`yrc`、`ytlrc` 和 `yromalrc`，开头的 JSON 元数据行不会作为歌词显示。
+
+### 添加自定义歌词
+
+1. 找到歌曲 ID。例如歌曲链接 `https://music.163.com/#/song?id=1815533595` 的 ID 是 `1815533595`。
+2. 在 `data-cache/Lyrics/song/1815533595/` 下创建目录。
+3. 将歌词文件按固定文件名放入目录：`lyric.lrc`、`lyric.lys`、`lyric.qrc`、`lyric.yrc`、`lyric.lqe`、`trans.lrc` 或 `roman.lrc`。
+4. 保存后重新进入歌曲或切歌。播放器每次开始播放和歌单切歌时都会重新读取本地缓存。
+
+自定义文件应使用 UTF-8 编码。空文件会被忽略；高级格式无法解析出有效歌词行时会自动回退到下一种格式，最终回退到 `lyric.lrc`。歌词和元数据缓存不受 `/cache` 的封面/音频大小限制影响，可用 `/clrcache other` 清理。
+
 Credits EX 在经过普通播放偏移校准后的前 `46800 ms` 显示包含封面、歌曲信息和控制区的完整播放器，随后以逐行 CRT 刷新效果切入彩蛋动画；到 `130000 ms`（`2:10`）再以相同效果切回完整播放器。两次切换约持续 1.5 秒，画面从上往下交叠替换，各行快速闪烁数次后稳定。该曲目在普通播放器和彩蛋阶段都只显示当前歌词及其翻译，不显示未播放歌词。
 
 ## 测试
@@ -258,6 +294,7 @@ npm run test:live
 - [mpv](https://mpv.io/)
 - [VLC](https://www.videolan.org/vlc/)
 - [FFmpeg / ffplay](https://ffmpeg.org/)
+- 歌词 QRC、YRC、Lyricify Syllable 解析思路参考 [WXRIW/Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper)
 - Credits EX 彩蛋移植自 MIT 项目 [frums-credits-cli-nosound](https://github.com/sititou70/frums-credits-cli-nosound)：保留原始 CSF 分镜与文本素材并实现兼容播放器，不包含其静音占位音频；详细归属见 [`assets/credits-csf/NOTICE.md`](assets/credits-csf/NOTICE.md)。
 - `NCM Credits VGA16` 字体改编自 Dimitar Toshkov Zhekov 创作的 Terminus Font，并通过 Ubuntu/Debian `console-setup` 分发；详细归属见 [`assets/fonts/NOTICE.md`](assets/fonts/NOTICE.md)。
 

@@ -22,7 +22,18 @@ const NAMESPACE_TYPES = Object.freeze({
   'track-cover': ['Covers', 'song', 'png'],
   'playlist-cover': ['Covers', 'playlist', 'png'],
   'song-music': ['Musics', 'song', 'cache'],
-  'song-lyrics': ['Lyrics', 'song', 'lrc']
+  'song-lyrics': ['Lyrics', 'song', 'lyric.lrc'],
+  'song-lyrics-qrc': ['Lyrics', 'song', 'lyric.qrc'],
+  'song-lyrics-lys': ['Lyrics', 'song', 'lyric.lys'],
+  'song-lyrics-lqe': ['Lyrics', 'song', 'lyric.lqe'],
+  'song-lyrics-yrc': ['Lyrics', 'song', 'lyric.yrc'],
+  'song-lyrics-translated': ['Lyrics', 'song', 'trans.lrc'],
+  'song-lyrics-romanized': ['Lyrics', 'song', 'roman.lrc'],
+  'song-metadata': ['Metadata', 'song', 'metadata'],
+  'playlist-metadata': ['Metadata', 'playlist', 'metadata'],
+  'playlist-tracks-metadata': ['Metadata', 'playlist-tracks', 'metadata'],
+  'user-playlists-metadata': ['Metadata', 'user-playlists', 'metadata'],
+  'liked-music-metadata': ['Metadata', 'liked-music', 'metadata']
 });
 
 function safePathPart(value, label) {
@@ -47,6 +58,7 @@ export function dataCachePath(identity, directory = dataCacheDirectory()) {
     // URL-based temporary identities cannot be used as path components.
     id = createHash('sha256').update(String(identity.id ?? '')).digest('hex');
   }
+  if (namespace === 'Lyrics') return path.join(directory, namespace, kind, id, extension);
   return path.join(directory, namespace, kind, `${id}.${extension}`);
 }
 
@@ -55,6 +67,7 @@ function scopedKey(directory, key) {
 }
 
 function remember(key, buffer) {
+  if (buffer.length > MAX_MEMORY_BYTES) return;
   const existing = memory.get(key);
   if (existing) memoryBytes -= existing.length;
   memory.delete(key);
@@ -90,7 +103,8 @@ async function prune(directory, maxBytes, logger) {
       const file = path.join(current, entry.name);
       if (entry.isDirectory()) await collect(file);
       else if (entry.isFile() && !entry.name.startsWith('.')
-          && /\.(?:png|cache|lrc)$/.test(entry.name)) {
+          && /\.(?:png|cache)$/.test(entry.name)
+          && ['Covers', 'Musics'].includes(path.relative(directory, file).split(path.sep)[0])) {
         try {
           const info = await stat(file);
           files.push({ file, size: info.size, mtimeMs: info.mtimeMs });
@@ -149,6 +163,19 @@ export function peekCachedData(identity, { directory = dataCacheDirectory() } = 
   } catch { return null; }
 }
 
+export async function readCachedData(identity, { directory = dataCacheDirectory() } = {}) {
+  const memoryHit = peekCachedData(identity, { directory });
+  if (memoryHit) return memoryHit;
+  try {
+    const buffer = await readFile(dataCachePath(identity, directory));
+    remember(scopedKey(directory, dataCacheKey(identity)), buffer);
+    return buffer;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 export async function loadCachedData(identity, {
   signal,
   maxBytes = 100 * 1024 * 1024,
@@ -159,6 +186,7 @@ export async function loadCachedData(identity, {
   legacyFiles = []
 } = {}) {
   if (typeof loader !== 'function') throw new TypeError('缓存 loader 必须是函数');
+  maxBytes = maxBytes == null ? Infinity : maxBytes;
   const key = dataCacheKey(identity);
   const memoryId = scopedKey(directory, key);
   const memoryHit = memory.get(memoryId);
@@ -168,7 +196,7 @@ export async function loadCachedData(identity, {
     if (maxBytes > 0) touch(dataCachePath(identity, directory));
     void logger?.info('data_cache_hit', {
       layer: 'memory', type: identity.type, key: key.slice(0, 12),
-      variant: identity.variant ?? 'default', bytes: memoryHit.length
+      variant: identity.variant ?? 'default', bytes: memoryHit.length, path: dataCachePath(identity, directory)
     });
     return waitForConsumer(Promise.resolve(memoryHit), signal);
   }
@@ -184,7 +212,8 @@ export async function loadCachedData(identity, {
             const legacy = candidate !== primary;
             void logger?.info('data_cache_hit', {
               layer: legacy ? 'legacy-disk' : 'disk', type: identity.type,
-              key: key.slice(0, 12), variant: identity.variant ?? 'default', bytes: buffer.length
+              key: key.slice(0, 12), variant: identity.variant ?? 'default', bytes: buffer.length,
+              path: candidate
             });
             if (legacy) await store(primary, buffer, maxBytes, logger, directory);
             return buffer;
@@ -199,10 +228,11 @@ export async function loadCachedData(identity, {
         }
       }
       void logger?.info('data_cache_miss', {
-        type: identity.type, key: key.slice(0, 12), variant: identity.variant ?? 'default'
+        type: identity.type, key: key.slice(0, 12), variant: identity.variant ?? 'default',
+        path: dataCachePath(identity, directory), maxBytes
       });
       const buffer = Buffer.from(await loader());
-      if (!validate(buffer)) throw new Error('加载的缓存内容无效');
+      if (!validate(buffer)) throw Object.assign(new Error('加载的缓存内容无效'), { code: 'INVALID_CACHE' });
       remember(memoryId, buffer);
       await store(dataCachePath(identity, directory), buffer, maxBytes, logger, directory);
       return buffer;
@@ -210,4 +240,76 @@ export async function loadCachedData(identity, {
     inflight.set(memoryId, shared);
   }
   return waitForConsumer(shared, signal);
+}
+
+export async function removeCachedData(identity, { directory = dataCacheDirectory() } = {}) {
+  const key = dataCacheKey(identity);
+  const memoryId = scopedKey(directory, key);
+  const existing = memory.get(memoryId);
+  if (existing) {
+    memory.delete(memoryId);
+    memoryBytes -= existing.length;
+  }
+  await rm(dataCachePath(identity, directory), { force: true });
+}
+
+async function collectCacheFiles(directory) {
+  const files = [];
+  async function collect(current) {
+    let entries;
+    try { entries = await readdir(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const target = path.join(current, entry.name);
+      if (entry.isDirectory()) await collect(target);
+      else if (entry.isFile() && !entry.name.startsWith('.')) {
+        try { files.push({ file: target, size: (await stat(target)).size }); } catch {}
+      }
+    }
+  }
+  await collect(directory);
+  return files;
+}
+
+export async function inspectDataCache(directory = dataCacheDirectory()) {
+  const files = await collectCacheFiles(directory);
+  const groups = { covers: 0, musics: 0, other: 0 };
+  for (const entry of files) {
+    const namespace = path.relative(directory, entry.file).split(path.sep)[0].toLowerCase();
+    const group = namespace === 'covers' ? 'covers' : namespace === 'musics' ? 'musics' : 'other';
+    groups[group] += entry.size;
+  }
+  return { ...groups, total: groups.covers + groups.musics + groups.other, files: files.length };
+}
+
+async function removeBestEffort(target) {
+  try { await rm(target, { recursive: true, force: true }); return; } catch (error) {
+    if (!['EBUSY', 'EPERM', 'EACCES'].includes(error.code)) throw error;
+  }
+  let entries = [];
+  try { entries = await readdir(target, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) await removeBestEffort(path.join(target, entry.name));
+}
+
+export async function clearDataCache(group, directory = dataCacheDirectory()) {
+  if (!['covers', 'musics', 'other'].includes(group)) {
+    throw new Error('缓存分类必须是 covers、musics 或 other');
+  }
+  if (group !== 'other') {
+    const name = group === 'covers' ? 'Covers' : 'Musics';
+    await removeBestEffort(path.join(directory, name));
+  } else {
+    let entries = [];
+    try { entries = await readdir(directory, { withFileTypes: true }); } catch {}
+    for (const entry of entries) {
+      if (!entry.isDirectory() || ['covers', 'musics'].includes(entry.name.toLowerCase())) continue;
+      await removeBestEffort(path.join(directory, entry.name));
+    }
+    // 日志与数据缓存同属本地运行产物，归入 other 一并清理。
+    await removeBestEffort(path.join(path.dirname(configFilePath()), 'logs'));
+  }
+  for (const [key, buffer] of memory) {
+    if (!key.startsWith(`${path.resolve(directory)}\0`)) continue;
+    memory.delete(key);
+    memoryBytes -= buffer.length;
+  }
 }

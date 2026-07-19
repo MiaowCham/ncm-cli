@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +22,17 @@ const result = spawnSync('dotnet', [
   '-p:IncludeNativeLibrariesForSelfExtract=true'
 ], { stdio: 'inherit', windowsHide: true, shell: false });
 
-if (result.status === 0) process.exit(0);
+if (result.status === 0) {
+  const projectDirectory = path.dirname(project);
+  for (const directory of ['bin', 'obj']) {
+    rmSync(path.join(projectDirectory, directory), { recursive: true, force: true });
+  }
+  for (const entry of readdirSync(output, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.toLowerCase() === 'ncm-cli-smtc-bridge.exe') continue;
+    rmSync(path.join(output, entry.name), { recursive: true, force: true });
+  }
+  process.exit(0);
+}
 const message = 'SMTC helper 构建失败；播放仍可使用，但不会接入 Windows SMTC。请安装 .NET 8 SDK 后运行 npm run build:smtc。';
 if (required) {
   console.error(message);

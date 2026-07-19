@@ -8,12 +8,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $project = Join-Path $PSScriptRoot "NcmCli.SmtcBridge.csproj"
+$output = Join-Path $PSScriptRoot "publish\$Runtime"
 $arguments = @(
     "publish",
     $project,
     "--configuration", $Configuration,
     "--runtime", $Runtime,
     "--self-contained", $SelfContained.IsPresent.ToString().ToLowerInvariant(),
+    "--output", $output,
     "-p:PublishSingleFile=true",
     "-p:IncludeNativeLibrariesForSelfExtract=true"
 )
@@ -22,3 +24,6 @@ $arguments = @(
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
+
+Remove-Item (Join-Path $PSScriptRoot "bin"), (Join-Path $PSScriptRoot "obj") -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $output -Force | Where-Object { $_.Name -ne "ncm-cli-smtc-bridge.exe" } | Remove-Item -Recurse -Force

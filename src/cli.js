@@ -13,8 +13,11 @@ import { readTerminalKey, selectTerminalList } from './terminal-list.js';
 import { acquireTerminalScreen } from './terminal-screen.js';
 import { secondaryText } from './terminal-theme.js';
 import { resolveNeteaseMusicInput } from './music-link.js';
+import { chooseLyricSource } from './lyrics.js';
 import { writeExport } from './output-file.js';
 import { cleanupStalePlayerSessions } from './player-registry.js';
+import { cacheSongMusic } from './resource-cache.js';
+import { clearDataCache, inspectDataCache } from './data-cache.js';
 import { creditsFontRecommendation, easterEggForSong } from './credits-csf.js';
 import {
   loadSettings, saveSettings, MIN_LYRIC_OFFSET_MS, MAX_LYRIC_OFFSET_MS
@@ -22,7 +25,7 @@ import {
 import {
   normalizeCookie, parseIdCommand, parseLoginCommand,
   parseLyricDirectCommand, parseLyricFormatSelection, parseLyricSearchCommand,
-  parseNumberSelection, parseOffsetCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand,
+  parseNumberSelection, parseOffsetCommand, parsePlayerCommand, parseImageCommand, parseQualityCommand, parseSignoutCommand, parseClearCommand, parseCacheCommand, parseClearCacheCommand,
   parseListPlaylistsCommand, parsePlaylistCommand,
   parseApiCommand,
   IMAGE_PROTOCOLS, PLAYER_BACKENDS, QUALITY_LEVELS
@@ -71,6 +74,8 @@ ${chalk.bold('命令')}
   /offset [毫秒]                          查看或设置播放时间偏移（默认 0）
   /api [url]                              查看或更换 API 地址
   /clear                                  清空终端并返回搜索
+  /cache [MB]                             查看或设置整体缓存上限
+  /clrcache [covers|musics|other]         查看或清理分类缓存
   /help                                   显示帮助
   /quit                                   退出程序
 
@@ -529,6 +534,45 @@ async function handleOffset(rl, settings, command, signal, logger) {
   }
 }
 
+function formatBytes(bytes) {
+  if (bytes == null || bytes === Infinity) return '不限制';
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+}
+
+async function handleCacheSetting(api, settings, command, logger) {
+  if (command.megabytes == null) {
+    console.log(`整体缓存上限：${formatBytes(settings.cacheMaxBytes)}`);
+    return;
+  }
+  const bytes = command.megabytes === 0 ? null : command.megabytes * 1024 * 1024;
+  await saveSettings({ ...settings, cacheMaxBytes: bytes });
+  settings.cacheMaxBytes = bytes;
+  api.setCacheMaxBytes(bytes);
+  void logger.info('cache_limit_changed', { bytes });
+  console.log(`整体缓存上限已设置为 ${formatBytes(bytes)}`);
+}
+
+async function handleClearCache(rl, command, signal) {
+  const before = await inspectDataCache();
+  let group = command.group;
+  if (!group) {
+    console.log(`封面：${formatBytes(before.covers)}`);
+    console.log(`歌曲：${formatBytes(before.musics)}`);
+    console.log(`其他：${formatBytes(before.other)}`);
+    console.log(`合计：${formatBytes(before.total)}`);
+    const selection = (await ask(rl, '清理 [1]封面 [2]歌曲 [3]其他 [q]取消 > ', signal)).trim();
+    group = selection === '1' ? 'covers' : selection === '2' ? 'musics' : selection === '3' ? 'other' : null;
+    if (!group) return;
+  }
+  await clearDataCache(group);
+  const labels = { covers: '封面', musics: '歌曲', other: '其他' };
+  console.log(`${labels[group]}缓存已清理`);
+}
+
 async function handleLogin(rl, api, authState, signal, logger) {
   const key = await api.qrKey({ signal });
   const qr = await api.qrCreate(key, { signal });
@@ -689,9 +733,12 @@ function unavailableUrlMessage(result, authState) {
 async function updateLikedPlaylist(api, song, context, operation = 'add') {
   const uid = context.authState.profile?.userId || context.authState.account?.id;
   if (!uid) throw new Error('无法确定当前登录用户');
-  context.likedPlaylistPromise ||= api.userPlaylists(uid, { signal: context.signal }).then((playlists) => {
+  context.likedPlaylistPromise ||= api.userPlaylists(uid, {
+    signal: context.signal, username: context.authState.profile?.nickname
+  }).then((playlists) => {
+    const username = context.authState.profile?.nickname || '';
     const liked = playlists.find((playlist) => playlist.specialType === 5
-      || /喜欢的音乐\s*$/.test(playlist.name));
+      || String(playlist.name || '').trim() === `${username}喜欢的音乐`);
     if (!liked) throw new Error('未找到“喜欢的音乐”歌单');
     return liked.id;
   });
@@ -703,24 +750,54 @@ async function updateLikedPlaylist(api, song, context, operation = 'add') {
 
 async function playSong(api, song, context, rl, cachedLyrics = null, returnPageRows = []) {
   const { signal, logger, authState, shutdown } = context;
-  const result = await api.songUrl(song.id, { signal });
+  let playbackUrl = await cacheSongMusic(song.id, null, {
+    signal, maxBytes: context.settings.cacheMaxBytes, logger
+  });
+  const result = playbackUrl ? { url: playbackUrl } : await api.songUrl(song.id, { signal });
   if (!result?.url) {
     console.log(unavailableUrlMessage(result, authState));
     console.log(`诊断日志：${logger.file}`);
     return cachedLyrics;
   }
   const lyrics = cachedLyrics || await api.lyrics(song.id, { signal });
+  const selectedLyrics = chooseLyricSource(lyrics);
+  void logger.info('lyrics_source_selected', {
+    songId: song.id, type: selectedLyrics.type,
+    lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || ''),
+    available: Object.fromEntries(['lys', 'qrc', 'yrc', 'original'].map((key) => [
+      key, { bytes: typeof lyrics?.[key] === 'string' ? Buffer.byteLength(lyrics[key]) : 0,
+        parsedLines: typeof lyrics?.[key] === 'string' ? chooseLyricSource({ [key]: lyrics[key] }).lines.length : 0 }
+    ]))
+  });
+  if (!playbackUrl) try {
+    playbackUrl = await cacheSongMusic(song.id, result.url, {
+      signal, maxBytes: context.settings.cacheMaxBytes, logger
+    });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    void logger.warn('song_cache_failed', { songId: song.id, error });
+  }
+  let favorited = false;
+  if (authState.loggedIn) {
+    const uid = authState.profile?.userId || authState.account?.id;
+    if (uid) favorited = await api.isSongLiked(uid, song.id, {
+      signal, username: authState.profile?.nickname
+    });
+  }
   await playWithProgress({
     song,
-    url: result.url,
+    url: playbackUrl,
     durationMs: song.durationMs,
-    lyricSource: lyrics.original,
+    lyricSource: selectedLyrics.source,
+    lyricType: selectedLyrics.type,
     translatedLyricSource: lyrics.translated,
+    romanizedLyricSource: lyrics.romanized,
+    favorited,
     lyricOffsetMs: context.settings.lyricOffsetMs,
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
-    imageCacheMaxBytes: context.settings.imageCacheMaxBytes,
+    imageCacheMaxBytes: context.settings.cacheMaxBytes,
     signal,
     logger,
     rl,
@@ -754,13 +831,27 @@ async function songMenuInScreen(rl, api, song, context) {
   let linksVisible = false;
   let songLinks = [];
   let favorited = false;
+  if (authState.loggedIn) {
+    const uid = authState.profile?.userId || authState.account?.id;
+    if (uid) {
+      try {
+        favorited = await api.isSongLiked(uid, song.id, {
+          signal, username: authState.profile?.nickname
+        });
+        void context.logger.info('liked_cache_result', { songId: song.id, favorited });
+      }
+      catch (error) {
+        if (!isAbortError(error)) void context.logger.warn('liked_cache_lookup_failed', { songId: song.id, error });
+      }
+    }
+  }
   let favoritePending = false;
   while (true) {
     const page = await openDetailPage(
       rl,
       (pageState) => showSong(
         song, signal, context.settings.imageProtocol, cachedLyrics, context.logger,
-        context.settings.imageCacheMaxBytes, pageState
+        context.settings.cacheMaxBytes, pageState
       ),
       () => detailFooterPrompt(
         chalk.yellow(songDetailPrompt({ loggedIn: authState.loggedIn, favorited })),
@@ -981,28 +1072,65 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     if (index < 0 || index >= tracks.length) return Promise.resolve(null);
     if (cache.has(index)) return cache.get(index);
     const promise = (async () => {
-      const song = tracks[index];
-      const result = await api.songUrl(song.id, { signal: context.signal });
+      const track = tracks[index];
+      let song = track;
+      try {
+        song = await api.songDetail(track.id, { signal: context.signal });
+        void context.logger.info('playlist_song_metadata_ready', { songId: song.id, index });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        void context.logger.warn('playlist_song_metadata_failed', { songId: track.id, index, error });
+      }
+      let playbackUrl = await cacheSongMusic(song.id, null, {
+        signal: context.signal, maxBytes: context.settings.cacheMaxBytes, logger: context.logger
+      });
+      const result = playbackUrl ? { url: playbackUrl } : await api.songUrl(song.id, { signal: context.signal });
       if (!result?.url) {
         unavailable.add(index);
         void context.logger.warn('playlist_track_unavailable', { songId: song.id, index, code: result?.code });
         return null;
       }
       unavailable.delete(index);
-      let lyrics = { original: '', translated: '' };
+      let lyrics = { original: '', translated: '', romanized: '', lys: '', qrc: '', yrc: '' };
       try {
         lyrics = await api.lyrics(song.id, { signal: context.signal });
       } catch (error) {
         if (isAbortError(error)) throw error;
         void context.logger.warn('playlist_lyrics_failed', { songId: song.id, error });
       }
+      const selectedLyrics = chooseLyricSource(lyrics);
+      void context.logger.info('lyrics_source_selected', {
+        songId: song.id, type: selectedLyrics.type,
+        lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || ''),
+        available: Object.fromEntries(['lys', 'qrc', 'yrc', 'original'].map((key) => [
+          key, { bytes: typeof lyrics?.[key] === 'string' ? Buffer.byteLength(lyrics[key]) : 0,
+            parsedLines: typeof lyrics?.[key] === 'string' ? chooseLyricSource({ [key]: lyrics[key] }).lines.length : 0 }
+        ]))
+      });
+      if (!playbackUrl) try {
+        playbackUrl = await cacheSongMusic(song.id, result.url, {
+          signal: context.signal, maxBytes: context.settings.cacheMaxBytes, logger: context.logger
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        void context.logger.warn('song_cache_failed', { songId: song.id, error });
+      }
       return {
         index,
         song,
-        url: result.url,
+        url: playbackUrl,
         durationMs: song.durationMs,
-        lyricSource: lyrics.original,
-        translatedLyricSource: lyrics.translated
+        lyricSource: selectedLyrics.source,
+        lyricType: selectedLyrics.type,
+        translatedLyricSource: lyrics.translated,
+        romanizedLyricSource: lyrics.romanized,
+        favorited: context.authState.loggedIn
+          ? await api.isSongLiked(
+              context.authState.profile?.userId || context.authState.account?.id,
+              song.id,
+              { username: context.authState.profile?.nickname }
+            )
+          : false
       };
     })().then((payload) => {
       if (!payload) cache.delete(index);
@@ -1045,7 +1173,7 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
-    imageCacheMaxBytes: context.settings.imageCacheMaxBytes,
+    imageCacheMaxBytes: context.settings.cacheMaxBytes,
     playlist: { name: playlist.name, tracks, currentIndex: activeIndex },
     signal: context.signal,
     logger: context.logger,
@@ -1112,7 +1240,7 @@ async function playlistMenuInScreen(rl, api, id, context) {
       protocol: context.settings.imageProtocol,
       logger: context.logger,
       diagnosticContext: 'playlist_detail',
-      imageCacheMaxBytes: context.settings.imageCacheMaxBytes,
+      imageCacheMaxBytes: context.settings.cacheMaxBytes,
       imageIdentity: { type: 'playlist-cover', id: playlist.id || id },
       preloadedBuffer: pageState.preloadedCoverBuffer,
       deferLoad: true,
@@ -1444,6 +1572,16 @@ async function resolveInput(rl, api, raw, context) {
     printHomeBanner(api, context);
     return;
   }
+  const cacheCommand = parseCacheCommand(raw);
+  if (cacheCommand) {
+    await handleCacheSetting(api, context.settings, cacheCommand, context.logger);
+    return;
+  }
+  const clearCacheCommand = parseClearCacheCommand(raw);
+  if (clearCacheCommand) {
+    await handleClearCache(rl, clearCacheCommand, context.signal);
+    return;
+  }
   const offset = parseOffsetCommand(raw);
   if (offset) {
     await handleOffset(rl, context.settings, offset, signal, logger);
@@ -1570,7 +1708,8 @@ export async function main(args = []) {
     }
     const apiConfiguration = await configureInitialApiBaseUrl(rl, settings, controller.signal, logger);
     const api = new NcmApi({
-      baseUrl: apiConfiguration.baseUrl, cookie, logger, quality: settings.quality
+      baseUrl: apiConfiguration.baseUrl, cookie, logger, quality: settings.quality,
+      cacheMaxBytes: settings.cacheMaxBytes
     });
     void logger.info('startup', {
       cookiePresent: Boolean(cookie), quality: settings.quality, lyricOffsetMs: settings.lyricOffsetMs,

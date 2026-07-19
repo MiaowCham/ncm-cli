@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import supportsTerminalGraphics from 'supports-terminal-graphics';
-import { parseLrc } from './lyrics.js';
+import { parseLrc, parseQrc, parseYrc, parseLyricifySyllable } from './lyrics.js';
 import { loadCachedImage, peekCachedImage } from './image-cache.js';
 import { createMpvController } from './mpv-controller.js';
 import { createSmtcBridge } from './smtc.js';
@@ -330,12 +330,22 @@ export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOff
   if (paused) return 1000;
   const toNextSecond = 1000 - (Math.floor(elapsedMs) % 1000 || 0);
   const lyricElapsedMs = lyricPosition(elapsedMs, lyricOffsetMs);
-  const nextLyric = lyricLines.find((line) => line.timeMs > lyricElapsedMs);
+  const scheduledLines = addLyricInterludes(lyricLines);
+  const nextLyric = scheduledLines.find((line) => line.timeMs > lyricElapsedMs);
   const toNextLyric = nextLyric ? nextLyric.timeMs - lyricElapsedMs : Infinity;
+  const syllableBoundaries = scheduledLines
+    .flatMap((line) => Array.isArray(line.syllables)
+      ? line.syllables.flatMap((syllable) => [syllable.startTime, syllable.endTime])
+      : [])
+    .map(Number)
+    .filter((time) => Number.isFinite(time) && time > lyricElapsedMs);
+  const nextSyllable = syllableBoundaries.length
+    ? Math.min(...syllableBoundaries) - lyricElapsedMs
+    : Infinity;
   const animationDelay = Number.isFinite(Number(animationIntervalMs))
     ? Math.max(16, Number(animationIntervalMs))
     : Infinity;
-  return clamp(Math.min(toNextSecond, toNextLyric, animationDelay), 16, 1000);
+  return clamp(Math.min(toNextSecond, toNextLyric, nextSyllable, animationDelay), 16, 1000);
 }
 
 function truncateText(text, width) {
@@ -430,36 +440,84 @@ export function lyricViewport(lines, elapsedMs, capacity) {
     if (lines[index].timeMs > elapsedMs) break;
     currentIndex = index;
   }
+  const hasDurations = lines.some((line) => Number.isFinite(line.endTimeMs));
+  const overlapEnabled = hasDurations && capacity >= 3;
+  const active = overlapEnabled
+    ? lines.map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.timeMs <= elapsedMs
+        && (!Number.isFinite(line.endTimeMs) || elapsedMs < line.endTimeMs))
+      .slice(-3)
+      .map(({ index }) => index)
+    : (currentIndex >= 0 ? [currentIndex] : []);
   // 播放页只显示当前歌词和之后的歌词，不再保留历史行。
-  const start = Math.max(0, currentIndex);
+  const start = active.length
+    ? Math.min(...active)
+    : (overlapEnabled ? Math.max(0, currentIndex + 1) : Math.max(0, currentIndex));
   return lines.slice(start, start + capacity).map((line, offset) => ({
-    ...line,
     played: start + offset <= currentIndex,
-    current: start + offset === currentIndex
-  }));
+    current: active.includes(start + offset),
+    ...line,
+  })).filter((line) =>
+    !overlapEnabled || !Number.isFinite(line.endTimeMs) || elapsedMs < line.endTimeMs
+  );
 }
 
-export function attachLyricTranslations(originalLines, translatedLines) {
+function addLyricInterludes(lines) {
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    output.push(line);
+    const next = lines[index + 1];
+    if (!next || !Number.isFinite(line.endTimeMs) || next.timeMs - line.endTimeMs <= 8000) continue;
+    const start = line.endTimeMs + 2000;
+    const end = next.timeMs - 1000;
+    if (end <= start) continue;
+    const span = end - start;
+    output.push({
+      timeMs: start, endTimeMs: end, text: '● ● ●', interlude: true,
+      syllables: [0, 1, 2].map((dot) => ({
+        text: dot === 2 ? '●' : '● ',
+        startTime: start + Math.round(span * dot / 3),
+        endTime: end
+      }))
+    });
+  }
+  return output;
+}
+
+export function attachLyricTranslations(originalLines, translatedLines, romanizedLines = []) {
   const translations = new Map();
   for (const line of translatedLines) {
     const texts = translations.get(line.timeMs) || [];
     if (!texts.includes(line.text)) texts.push(line.text);
     translations.set(line.timeMs, texts);
   }
-  return originalLines.map((line) => ({
-    ...line,
-    translation: (translations.get(line.timeMs) || []).filter((text) => text !== line.text).join(' / ')
-  }));
+  const romanized = new Map();
+  for (const line of romanizedLines) romanized.set(line.timeMs, line.text);
+  return originalLines.map((line) => {
+    const value = {
+      ...line,
+      translation: (translations.get(line.timeMs) || []).filter((text) => text !== line.text).join(' / ')
+    };
+    const romanizedText = romanized.get(line.timeMs);
+    if (romanizedText) value.romanized = romanizedText;
+    return value;
+  });
 }
 
 export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation, width = Infinity, currentOnly = false) {
   if (capacity <= 0) return [];
-  const viewport = lyricViewport(lines, elapsedMs, capacity);
+  const viewport = lyricViewport(addLyricInterludes(lines), elapsedMs, capacity);
   const visible = currentOnly ? viewport.filter((line) => line.current) : viewport;
   const rowsFor = (line, includeTranslation = true) => {
     const wrap = (text, translation) => (Number.isFinite(width) ? wrapTerminalText(text, width) : [text])
       .map((part, index) => ({
-        text: part, played: line.played, current: line.current, translation, continuation: index > 0
+        text: part,
+        played: line.played,
+        current: line.current,
+        translation,
+        continuation: index > 0,
+        ...(translation || index > 0 ? {} : { syllables: line.syllables })
       }));
     const rows = wrap(line.text, false);
     if (includeTranslation && showTranslation && line.translation) {
@@ -485,6 +543,19 @@ export function lyricTone(line) {
   if (line.current) return 'current';
   if (line.played) return 'played';
   return 'future';
+}
+
+export function renderSyllableText(line, elapsedMs, tone, width = Infinity) {
+  if (!Array.isArray(line?.syllables) || !line.syllables.length) return truncateText(line?.text || '', width);
+  const text = line.syllables.map((syllable) => {
+    const start = Number(syllable.startTime);
+    const end = Number(syllable.endTime);
+    const value = syllable.text || '';
+    if (Number.isFinite(start) && Number.isFinite(end) && elapsedMs >= end) return chalk.white(value);
+    if (Number.isFinite(start) && elapsedMs >= start) return primaryText(value);
+    return secondaryText(value);
+  }).join('');
+  return width === Infinity ? text : truncateText(text, width);
 }
 
 export function playlistViewport(tracks, selectedIndex, currentIndex, capacity) {
@@ -520,8 +591,9 @@ export function shuffledPlaylistOrder(length, currentIndex, random = Math.random
   return length ? [currentIndex, ...rest] : [];
 }
 
-export function playbackShortcutText({ canFavorite = false, favorited = false } = {}) {
-  const base = 'q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移  t 翻译  r 刷新';
+export function playbackShortcutText({ canFavorite = false, favorited = false, canToggleTranslation = true, hasTranslation = true, hasRomanized = true } = {}) {
+  const label = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
+  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? `  t ${label}` : ''}  r 刷新`;
   return canFavorite ? `${base}  f ${favorited ? '取消收藏' : '收藏'}` : base;
 }
 
@@ -912,6 +984,7 @@ function renderDynamic({
   dynamicRow,
   dynamicAnchored,
   showTranslation,
+  showRomanized = false,
   indicator,
   playlist,
   playlistOpen,
@@ -921,6 +994,8 @@ function renderDynamic({
   easterEgg = null,
   canFavorite = false,
   favorited = false,
+  translationMode = 'off',
+  canToggleTranslation = true,
   replacePausedContent = false,
   compactPausedRow = '',
   compactPausedArtist = '',
@@ -953,7 +1028,17 @@ function renderDynamic({
         playlistOpen: playbackModeText.playlistOpen
       }, columns).map((row) => chalk.magentaBright(row))
     : [];
-  const shortcutRows = playbackShortcutRows({ canFavorite, favorited }, columns).map((row) => chalk.cyanBright(row));
+  const hasTranslation = lyrics.some((line) => Boolean(line.translation));
+  const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+  const shortcutLabel = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
+  const shortcutRows = playbackShortcutRows({ canFavorite, favorited, canToggleTranslation, hasTranslation, hasRomanized }, columns).map((row) => {
+    const label = translationMode === 'off'
+      ? chalk.gray(shortcutLabel)
+      : translationMode === 'translated'
+        ? `${chalk.cyanBright('译')}${hasRomanized ? chalk.gray('/音') : ''}`
+        : `${hasTranslation ? chalk.gray('译/') : ''}\x1b[1m${chalk.cyanBright('音')}`;
+    return chalk.cyanBright(row.replace(`t ${shortcutLabel}`, `t ${label}`));
+  });
   if (playlistOpen) {
     const outputRows = playbackPlaylistOverlayRows({
       playlist,
@@ -976,13 +1061,18 @@ function renderDynamic({
     requiredContentRows = frameRows.slice(0, 1);
     optionalSuffixRows = frameRows.slice(1);
   } else {
+    const displayLyrics = showRomanized
+      ? lyrics.map((line) => ({ ...line, translation: line.romanized || '' }))
+      : lyrics;
     const displayRows = playbackLyricRows(
-      lyrics, lyricElapsedMs, rows, showTranslation, columns, currentLyricOnly
+      displayLyrics, lyricElapsedMs, rows, showTranslation || showRomanized, columns, currentLyricOnly
     );
     const lyricRows = displayRows.length
       ? displayRows.map((line) => {
-          const text = truncateText(line.text, columns);
           const tone = lyricTone(line);
+          const text = line.syllables?.length
+            ? renderSyllableText(line, lyricElapsedMs, tone, columns)
+            : truncateText(line.text, columns);
           const rendered = tone === 'future'
             ? secondaryText(text)
             : line.translation
@@ -1547,7 +1637,9 @@ export async function playWithProgress({
   url,
   durationMs,
   lyricSource = '',
+  lyricType = 'lrc',
   translatedLyricSource = '',
+  romanizedLyricSource = '',
   lyricOffsetMs = 0,
   smtcOffsetMs = 0,
   playerBackend = 'auto',
@@ -1560,6 +1652,7 @@ export async function playWithProgress({
   onInterrupt,
   onTrackChange,
   onFavorite,
+  favorited = false,
   returnPageRows = []
 }) {
   let releaseScreen = () => {};
@@ -1582,7 +1675,14 @@ export async function playWithProgress({
   let activeSong = song;
   let activeUrl = url;
   let activeDurationMs = durationMs;
-  let lyrics = attachLyricTranslations(parseLrc(lyricSource), parseLrc(translatedLyricSource));
+  const parseSelected = lyricType === 'lys' ? parseLyricifySyllable
+    : lyricType === 'qrc' ? parseQrc
+      : lyricType === 'yrc' ? parseYrc : parseLrc;
+  let lyrics = attachLyricTranslations(
+    parseSelected(String(lyricSource ?? '')),
+    parseLrc(String(translatedLyricSource ?? '')),
+    parseLrc(String(romanizedLyricSource ?? ''))
+  );
   let clock = createPlaybackClock(activeDurationMs);
   // 创建 bridge、下载封面等准备工作不应计入真实播放位置。
   clock.pause();
@@ -1592,11 +1692,21 @@ export async function playWithProgress({
   let volume = 100;
   let userPaused = false;
   let hasTranslation = lyrics.some((line) => Boolean(line.translation));
-  let showTranslation = hasTranslation;
+  let preferredTranslationMode = 'off';
+  let showTranslation = false;
+  let showRomanized = false;
+  const applyPreferredTranslation = () => {
+    const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+    showTranslation = preferredTranslationMode === 'translated' ? hasTranslation
+      : preferredTranslationMode === 'romanized' ? !hasRomanized && hasTranslation : false;
+    showRomanized = preferredTranslationMode === 'romanized' ? hasRomanized
+      : preferredTranslationMode === 'translated' ? !hasTranslation && hasRomanized : false;
+  };
   let indicator = '';
+  let playerError = '';
   let indicatorUntil = 0;
   let favoritePending = false;
-  const favoritedSongIds = new Set();
+  const favoritedSongIds = new Set(favorited && activeSong?.id != null ? [String(activeSong.id)] : []);
   const playlistTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
   let playlistCurrentIndex = playlistTracks.length
     ? clamp(Math.floor(Number(playlist?.currentIndex) || 0), 0, playlistTracks.length - 1)
@@ -1724,14 +1834,22 @@ export async function playWithProgress({
     updateSmtc('playing', positionMs);
     void logger?.info('player_spawn', { player: player.command, pid: instance.pid, positionMs });
     instance.once('error', (error) => {
-      if (!finished && !intentionalStops.has(instance)) rejectCompletion(error);
+      if (!finished && !intentionalStops.has(instance)) {
+        child = null; sessionEnded = true; if (!clock.paused) clock.pause();
+        playerError = error?.message || '播放器启动失败';
+        setIndicator(`播放器异常：${playerError}，按空格重启`); render();
+      }
     });
     instance.once('exit', (code, exitSignal) => {
       void logger?.info('player_exit', { player: player.command, code, signal: exitSignal });
       if (!finished && child === instance && !intentionalStops.has(instance)) {
         child = null;
         if (code === 0 && !exitSignal) enqueue(() => handleNaturalEnd());
-        else rejectCompletion(new Error(`${player.command} 异常退出（code=${code}, signal=${exitSignal || 'none'}）`));
+        else {
+          sessionEnded = true; if (!clock.paused) clock.pause();
+          playerError = `${player.command} 异常退出（code=${code}, signal=${exitSignal || 'none'}）`;
+          setIndicator(`播放器异常：${playerError}，按空格重启`); render();
+        }
       }
     });
   };
@@ -1835,6 +1953,9 @@ export async function playWithProgress({
       paused: userPaused,
       lyrics,
       showTranslation,
+      showRomanized,
+      translationMode: showRomanized ? 'romanized' : showTranslation ? 'translated' : 'off',
+      canToggleTranslation: lyrics.some((line) => Boolean(line.translation || line.romanized)),
       indicator,
       playlist: playbackPlaylist,
       playlistOpen,
@@ -1959,6 +2080,7 @@ export async function playWithProgress({
       paused: true,
       lyrics,
       showTranslation,
+      showRomanized,
       indicator,
       playlist: playbackPlaylist,
       playlistOpen: false,
@@ -2134,6 +2256,7 @@ export async function playWithProgress({
       paused: userPaused,
       lyrics,
       showTranslation,
+      showRomanized,
       indicator,
       playlist: playbackPlaylist,
       playlistOpen: false,
@@ -2421,18 +2544,26 @@ export async function playWithProgress({
       ? clamp(next.index, 0, playlistTracks.length - 1)
       : targetIndex;
     activeSong = next.song;
+    const nextSongId = String(activeSong?.id ?? '');
+    if (next.favorited) favoritedSongIds.add(nextSongId);
+    else favoritedSongIds.delete(nextSongId);
     activeOffsetMs = trackOffset.reset();
     creditsFullPlayerActive = false;
     creditsPlayerHeaderRows = [];
     creditsTransitionHeaderRows = null;
     activeUrl = next.url;
     activeDurationMs = Math.max(0, Number(next.durationMs ?? next.song.durationMs) || 0);
+    const nextParser = next.lyricType === 'lys' ? parseLyricifySyllable
+      : next.lyricType === 'qrc' ? parseQrc
+        : next.lyricType === 'yrc' ? parseYrc : parseLrc;
     lyrics = Array.isArray(next.lyrics) ? next.lyrics : attachLyricTranslations(
-      parseLrc(next.lyricSource ?? next.lyrics?.original ?? ''),
-      parseLrc(next.translatedLyricSource ?? next.lyrics?.translated ?? '')
+      nextParser(next.lyricSource ?? next.lyrics?.original ?? ''),
+      parseLrc(String(next.translatedLyricSource ?? next.lyrics?.translated ?? '')),
+      parseLrc(String(next.romanizedLyricSource ?? next.lyrics?.romanized ?? ''))
     );
     hasTranslation = lyrics.some((line) => Boolean(line.translation));
-    showTranslation = hasTranslation;
+    const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+    applyPreferredTranslation();
     playlistCurrentIndex = resolvedIndex;
     if (!sameTrack && cause !== 'history') playHistory.push(resolvedIndex);
     playbackPlaylist.currentIndex = resolvedIndex;
@@ -2699,6 +2830,7 @@ export async function playWithProgress({
         enqueue(async () => {
           if (closing) return;
           userPaused = false;
+          playerError = '';
           clock.seekTo(0);
           await spawnAt(0);
           clock.resume();
@@ -2772,9 +2904,23 @@ export async function playWithProgress({
       return;
     }
     if (action.type === 'toggle_translation') {
-      const next = toggleTranslationState(showTranslation, hasTranslation);
-      showTranslation = next.showTranslation;
-      setIndicator(next.indicator);
+      const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+      if (!hasTranslation && !hasRomanized) return;
+      if (showRomanized) {
+        showRomanized = false;
+        showTranslation = false;
+      } else if (showTranslation && hasRomanized) {
+        showTranslation = false;
+        showRomanized = true;
+      } else if (showTranslation) {
+        showTranslation = false;
+      } else if (hasTranslation) {
+        showTranslation = true;
+      } else {
+        showRomanized = true;
+      }
+      preferredTranslationMode = showRomanized ? 'romanized' : showTranslation ? 'translated' : 'off';
+      setIndicator(showRomanized ? '音译已开启' : showTranslation ? '翻译已开启' : '翻译已关闭');
       render();
     }
   };

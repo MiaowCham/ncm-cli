@@ -20,6 +20,16 @@ export function parseClearCommand(input) {
   return /^\/clear$/i.test(input.trim());
 }
 
+export function parseCacheCommand(input) {
+  const match = String(input).trim().match(/^\/cache(?:\s+(\d+))?$/i);
+  return match ? { megabytes: match[1] == null ? null : Number(match[1]) } : null;
+}
+
+export function parseClearCacheCommand(input) {
+  const match = String(input).trim().match(/^\/clrcache(?:\s+(covers|musics|other))?$/i);
+  return match ? { group: match[1]?.toLowerCase() || null } : null;
+}
+
 export function parseListPlaylistsCommand(input) {
   return /^\/lspl$/i.test(input.trim());
 }
