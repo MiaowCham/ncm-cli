@@ -69,7 +69,26 @@ function parseSyllableLines(source = '') {
 export function parseQrc(source = '') { return parseSyllableLines(source); }
 
 export function parseLyricifySyllable(source = '') {
-  return parseSyllableLines(String(source).replace(/^\[\d+\]/gm, ''));
+  const output = [];
+  for (const raw of String(source).split(/\r?\n/)) {
+    const line = raw.trim();
+    const match = line.match(/^\[\d+\](.*)$/);
+    if (!match) continue;
+    const body = match[1].trim();
+    const syllables = [];
+    const tokenPattern = /(.*?)\((\d+),(\d+)\)/g;
+    let token;
+    while ((token = tokenPattern.exec(body))) {
+      const startTime = Number(token[2]);
+      syllables.push({ text: token[1], startTime, endTime: startTime + Number(token[3]) });
+    }
+    if (!syllables.length) continue;
+    const text = syllables.map((item) => item.text).join('');
+    const timeMs = Math.min(...syllables.map((item) => item.startTime));
+    const endTimeMs = Math.max(...syllables.map((item) => item.endTime));
+    if (text.trim()) output.push({ timeMs, endTimeMs, text, syllables });
+  }
+  return output.sort((a, b) => a.timeMs - b.timeMs);
 }
 
 export function parseYrc(source = '') {
