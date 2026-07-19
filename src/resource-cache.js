@@ -1,7 +1,12 @@
-import { dataCachePath, loadCachedData, readCachedData } from './data-cache.js';
+import { dataCacheDirectory, dataCachePath, loadCachedData, readCachedData, removeCachedData, writeCachedData } from './data-cache.js';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { configFilePath } from './cookie-store.js';
+import { loadUserLyrics, migrateLegacyImportedLyrics } from './lyric-import.js';
+
+const userStateWrites = new Map();
+const lyricsRevalidating = new Map();
+const lyricsRevalidatedAt = new Map();
 
 export async function readCachedJson(identity) {
   const buffer = await readCachedData(identity);
@@ -13,19 +18,22 @@ export async function readCachedJson(identity) {
 }
 
 export async function loadCachedJson(identity, loader, {
-  signal, maxBytes, logger, directory, ttlMs = 24 * 60 * 60 * 1000
+  signal, maxBytes, logger, directory, ttlMs = 24 * 60 * 60 * 1000, onCacheUpdated,
+  forceRevalidate = false
 } = {}) {
-  // 元数据始终缓存，不受封面/音频容量设置影响。
+  // 元数据缓存命中后立即返回，并在后台重新校验远端内容。
   const validate = (buffer) => {
     try {
       const value = JSON.parse(buffer.toString('utf8'));
-      return value?.version === 1 && Number.isFinite(value.cachedAt)
-        && Date.now() - value.cachedAt <= ttlMs && 'payload' in value;
+      return value?.version === 1 && Number.isFinite(value.cachedAt) && 'payload' in value;
     } catch { return false; }
   };
-  const buffer = await loadCachedData(identity, {
-    signal, maxBytes: Infinity, logger, directory, validate,
-    loader: async () => Buffer.from(JSON.stringify({
+  const envelope = async (payload) => {
+    let userState;
+    if (identity.type === 'song-metadata') {
+      try { userState = JSON.parse((await readCachedData(identity, { directory }))?.toString('utf8') || 'null')?.userState; } catch {}
+    }
+    return Buffer.from(JSON.stringify({
       version: 1, cachedAt: Date.now(),
       cachePath: path.relative(path.dirname(configFilePath()), dataCachePath(identity, directory)),
       cachePaths: identity.type === 'song-metadata' ? {
@@ -36,13 +44,97 @@ export async function loadCachedJson(identity, loader, {
           yrc: path.relative(path.dirname(configFilePath()), dataCachePath({ type: 'song-lyrics-yrc', id: identity.id }, directory))
         }
       } : undefined,
-      payload: await loader()
-    }), 'utf8')
+      ...(userState && typeof userState === 'object' ? { userState } : {}),
+      payload
+    }), 'utf8');
+  };
+  const buffer = await loadCachedData(identity, {
+    signal, maxBytes: Infinity, logger, directory, validate, revalidate: true,
+    forceRevalidate,
+    revalidateIntervalMs: Math.max(30 * 1000, Math.min(ttlMs, 60 * 1000)),
+    isEqual: (next, previous) => {
+      try {
+        return JSON.stringify(JSON.parse(next.toString('utf8')).payload)
+          === JSON.stringify(JSON.parse(previous.toString('utf8')).payload);
+      } catch { return false; }
+    },
+    onUpdated: (next, previous) => {
+      try { onCacheUpdated?.(JSON.parse(next.toString('utf8')).payload, JSON.parse(previous.toString('utf8')).payload); } catch {}
+    },
+    loader: async () => envelope(await loader()),
+    revalidateLoader: async () => envelope(await loader({ background: true }))
   });
   return JSON.parse(buffer.toString('utf8')).payload;
 }
 
+export async function readSongUserState(id, options = {}) {
+  const buffer = await readCachedData({ type: 'song-metadata', id }, options);
+  if (!buffer) return {};
+  try {
+    const state = JSON.parse(buffer.toString('utf8'))?.userState;
+    return state && typeof state === 'object' ? state : {};
+  } catch { return {}; }
+}
+
+export async function updateSongUserState(id, patch, options = {}) {
+  const key = `${path.resolve(options.directory || '.')}:${id}`;
+  const pending = (userStateWrites.get(key) || Promise.resolve()).then(async () => {
+    const identity = { type: 'song-metadata', id };
+    const buffer = await readCachedData(identity, options);
+    let envelope = { version: 1, cachedAt: 0, payload: null };
+    try {
+      const parsed = JSON.parse(buffer?.toString('utf8') || 'null');
+      if (parsed?.version === 1 && 'payload' in parsed) envelope = parsed;
+    } catch {}
+    envelope.userState = { ...(envelope.userState || {}), ...patch };
+    await writeCachedData(identity, Buffer.from(JSON.stringify(envelope)), options);
+    return envelope.userState;
+  });
+  userStateWrites.set(key, pending);
+  try { return await pending; } finally {
+    if (userStateWrites.get(key) === pending) userStateWrites.delete(key);
+  }
+}
+
 export async function loadCachedLyrics(id, loader, options = {}) {
+  const userLyrics = await loadUserLyrics(id, options) || await migrateLegacyImportedLyrics(id, options);
+  const refreshKey = `${path.resolve(options.directory || dataCacheDirectory())}:${id}`;
+  const scheduleRefresh = () => {
+    if (lyricsRevalidating.has(refreshKey)
+        || (!options.forceRevalidate
+          && Date.now() - (lyricsRevalidatedAt.get(refreshKey) || 0) < 60 * 1000)) return;
+    lyricsRevalidatedAt.set(refreshKey, Date.now());
+    const task = Promise.resolve().then(async () => {
+      const remote = await loader({ background: true });
+      const tracks = [
+        ['song-lyrics', 'original'],
+        ['song-lyrics-translated', 'translated'],
+        ['song-lyrics-romanized', 'romanized'],
+        ['song-lyrics-yrc', 'yrc']
+      ];
+      let changed = false;
+      for (const [type, field] of tracks) {
+        const identity = { type, id };
+        const next = Buffer.from(String(remote?.[field] || ''), 'utf8');
+        const previous = await readCachedData(identity, options);
+        if (previous?.equals(next) || (!previous && !next.length)) continue;
+        changed = true;
+        if (next.length) await writeCachedData(identity, next, options);
+        else await removeCachedData(identity, options);
+      }
+      if (changed && !userLyrics) {
+        try { options.onCacheUpdated?.(remote); } catch {}
+      }
+    }).catch((error) => {
+      void options.logger?.warn('lyrics_cache_revalidate_failed', { songId: id, error });
+    }).finally(() => lyricsRevalidating.delete(refreshKey));
+    lyricsRevalidating.set(refreshKey, task);
+  };
+  if (userLyrics) {
+    scheduleRefresh();
+    void options.logger?.info('user_lyrics_hit', { songId: id, format: userLyrics.format });
+    return userLyrics.lyrics;
+  }
   let shared;
   const fetchLyrics = () => (shared ||= loader());
   const readLocal = async (type) => {
@@ -61,6 +153,7 @@ export async function loadCachedLyrics(id, loader, options = {}) {
     ['song-lyrics-lqe', 'lqe'], ['song-lyrics-lys', 'lys'], ['song-lyrics-qrc', 'qrc'], ['song-lyrics-yrc', 'yrc']
   ].map(async ([type, field]) => [field, await readLocal(type)]));
   const local = Object.fromEntries(localFormats);
+  if (Object.values(local).some(Boolean)) scheduleRefresh();
   for (const [field, value] of Object.entries(local)) {
     void options.logger?.info(value ? 'lyrics_advanced_cache_hit' : 'lyrics_advanced_cache_miss', {
       songId: id, format: field, bytes: value ? Buffer.byteLength(value) : 0
@@ -90,6 +183,7 @@ export async function loadCachedLyrics(id, loader, options = {}) {
   const loadTrack = async (type, field) => {
     const local = await readLocal(type);
     if (local != null) {
+      scheduleRefresh();
       void options.logger?.info('lyrics_local_file_hit', { songId: id, type, bytes: Buffer.byteLength(local) });
       return local;
     }

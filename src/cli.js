@@ -16,7 +16,8 @@ import { resolveNeteaseMusicInput } from './music-link.js';
 import { chooseLyricSource } from './lyrics.js';
 import { writeExport } from './output-file.js';
 import { cleanupStalePlayerSessions } from './player-registry.js';
-import { cacheSongMusic } from './resource-cache.js';
+import { cacheSongMusic, readSongUserState, updateSongUserState } from './resource-cache.js';
+import { importLyricsFile, removeUserLyrics } from './lyric-import.js';
 import { clearDataCache, inspectDataCache } from './data-cache.js';
 import { creditsFontRecommendation, easterEggForSong } from './credits-csf.js';
 import {
@@ -81,9 +82,9 @@ ${chalk.bold('命令')}
 
 歌词命令、搜索结果和后续格式选项支持 ${chalk.cyan('> 文件名.lrc')} 或 ${chalk.cyan('| 文件名.lrc')}。
 音质 level：${QUALITY_LEVELS.join('、')}。
-歌曲详情：p 播放，l 歌词导出，u 播放链接和封面链接，q 返回。
+歌曲详情：Enter/p 播放，l 歌词导出，i 导入歌词，u 播放链接和封面链接，q 返回。
 歌单详情：p 播放，l 滚动选择歌曲，e 选择格式导出列表，u 歌单链接和封面链接，q 返回。
-播放页：q 停止返回，r 刷新页面，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，Ctrl+↑/↓ 调整偏移 50ms，t 开关翻译。
+播放页：q 停止返回，r 刷新页面，i 导入歌词，空格暂停/继续，←/→ 后退/前进 5 秒，↑/↓ 调整音量，Ctrl+↑/↓ 调整偏移 50ms，t 开关翻译。
 歌单播放：p 打开/关闭播放列表，s 切换随机模式，l 切换循环模式，Ctrl+←/→ 切换歌曲；列表中 ↑/↓ 选择、Enter 播放。
 命令行：输入斜杠命令或参数前缀后按 Tab 自动补全。
 `);
@@ -208,15 +209,19 @@ function delay(ms, signal) {
 }
 
 export function songLyricPreview(lyrics, capacity) {
-  const text = plainLyrics(lyrics?.original || '');
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = songLyricPreviewLines(lyrics);
   return lines.slice(0, Math.max(0, Math.floor(Number(capacity) || 0)));
 }
 
 export function songLyricPreviewRemaining(lyrics, capacity) {
-  const text = plainLyrics(lyrics?.original || '');
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = songLyricPreviewLines(lyrics);
   return Math.max(0, lines.length - Math.max(0, Math.floor(Number(capacity) || 0)));
+}
+
+function songLyricPreviewLines(lyrics) {
+  const advanced = ['lqe', 'lys', 'qrc', 'yrc'].some((format) => String(lyrics?.[format] || '').trim());
+  if (advanced) return chooseLyricSource(lyrics).lines.map((line) => line.text.trim()).filter(Boolean);
+  return plainLyrics(lyrics?.original || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 export function songDetailMetadataLines(song, platform = process.platform) {
@@ -245,7 +250,8 @@ async function showSong(
         logger,
         diagnosticContext: 'song_detail',
         imageCacheMaxBytes,
-        imageIdentity: { type: 'track-cover', id: song.id },
+      imageIdentity: { type: 'track-cover', id: song.id },
+        forceRefresh: Boolean(pageState.forceCoverRefresh),
         preloadedBuffer: pageState.preloadedCoverBuffer,
         deferLoad: true,
         onDeferredReady: pageState.onImageReady,
@@ -759,7 +765,11 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     console.log(`诊断日志：${logger.file}`);
     return cachedLyrics;
   }
-  const lyrics = cachedLyrics || await api.lyrics(song.id, { signal });
+  let applyLyricsRefresh = null;
+  let lyrics = cachedLyrics || await api.lyrics(song.id, {
+    signal,
+    onCacheUpdated: (next) => applyLyricsRefresh?.({ lyrics: next, selected: chooseLyricSource(next) })
+  });
   const selectedLyrics = chooseLyricSource(lyrics);
   void logger.info('lyrics_source_selected', {
     songId: song.id, type: selectedLyrics.type,
@@ -784,6 +794,7 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
       signal, username: authState.profile?.nickname
     });
   }
+  const userState = await readSongUserState(song.id);
   await playWithProgress({
     song,
     url: playbackUrl,
@@ -793,7 +804,8 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     translatedLyricSource: lyrics.translated,
     romanizedLyricSource: lyrics.romanized,
     favorited,
-    lyricOffsetMs: context.settings.lyricOffsetMs,
+    lyricOffsetMs: Number.isFinite(userState.lyricOffsetMs) ? userState.lyricOffsetMs : context.settings.lyricOffsetMs,
+    translationMode: context.settings.translationMode,
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
@@ -804,6 +816,22 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     onFavorite: authState.loggedIn
       ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
       : undefined,
+    onImportLyrics: async (currentSong, file) => {
+      if (file === '!delete') {
+        await removeUserLyrics(currentSong.id);
+        lyrics = await api.lyrics(currentSong.id, { signal });
+        return { removed: true, lyrics, selected: chooseLyricSource(lyrics) };
+      }
+      const imported = await importLyricsFile(currentSong.id, file, { logger });
+      lyrics = imported.lyrics;
+      return imported;
+    },
+    onTrackUserStateChange: (currentSong, patch) => updateSongUserState(currentSong.id, patch),
+    onTranslationModeChange: async (translationMode) => {
+      context.settings.translationMode = translationMode;
+      await saveSettings({ ...context.settings, translationMode });
+    },
+    registerLyricsRefresh: (handler) => { applyLyricsRefresh = handler; },
     returnPageRows,
     onInterrupt: () => shutdown('playback_ctrl_c')
   });
@@ -846,28 +874,72 @@ async function songMenuInScreen(rl, api, song, context) {
     }
   }
   let favoritePending = false;
+  let forceCoverRefresh = false;
   while (true) {
     const page = await openDetailPage(
       rl,
-      (pageState) => showSong(
-        song, signal, context.settings.imageProtocol, cachedLyrics, context.logger,
-        context.settings.cacheMaxBytes, pageState
-      ),
+      (pageState) => {
+        const force = forceCoverRefresh;
+        forceCoverRefresh = false;
+        return showSong(
+          song, signal, context.settings.imageProtocol, cachedLyrics, context.logger,
+          context.settings.cacheMaxBytes, { ...pageState, forceCoverRefresh: force }
+        );
+      },
       () => detailFooterPrompt(
         chalk.yellow(songDetailPrompt({ loggedIn: authState.loggedIn, favorited })),
         linksVisible ? songLinks : []
       ),
-      authState.loggedIn ? ['p', 'l', 'u', 'f', 'q'] : ['p', 'l', 'u', 'q'],
+      authState.loggedIn ? ['\r', '\n', 'p', 'l', 'i', 'u', 'f', 'r', 'q'] : ['\r', '\n', 'p', 'l', 'i', 'u', 'r', 'q'],
       context
     );
     const { action } = page;
     try {
       if (/^(?:q|b|back|返回)$/i.test(action)) return;
+      if (/^(?:r|refresh|刷新)$/i.test(action)) {
+        linksVisible = false;
+        forceCoverRefresh = true;
+        void api.songDetail(song.id, {
+          forceRevalidate: true,
+          onCacheUpdated: (next) => Object.assign(song, next)
+        }).catch((error) => void context.logger.warn('song_detail_refresh_failed', { songId: song.id, error }));
+        void api.lyrics(song.id, {
+          forceRevalidate: true,
+          onCacheUpdated: (next) => { cachedLyrics = next; }
+        }).catch((error) => void context.logger.warn('song_lyrics_refresh_failed', { songId: song.id, error }));
+        continue;
+      }
       if (/^(?:l|lyric|歌词)$/i.test(action)) {
         linksVisible = false;
         prepareDetailOverlay(8);
         const result = await lyricFormatMenu(rl, api, song, { outputFile: '', signal, silent: true });
         if (result?.written) await showDetailNotice(`歌词已写入：${result.file}`, context);
+        continue;
+      }
+      if (/^(?:i|import|导入)$/i.test(action)) {
+        linksVisible = false;
+        try {
+          let file;
+          if (input.isTTY && output.isTTY) {
+            output.write(detailInlinePromptSequence(page.bodyRows, '请输入歌词路径：'));
+            file = (await ask(rl, '', signal)).trim();
+          } else {
+            file = (await ask(rl, '请输入歌词路径：', signal)).trim();
+          }
+          if (!file || file.toLowerCase() === 'q') continue;
+          if (file === '!delete') {
+            await removeUserLyrics(song.id);
+            cachedLyrics = await api.lyrics(song.id, { signal });
+            await showDetailNotice('已删除当前曲目的用户歌词', context);
+            continue;
+          }
+          const imported = await importLyricsFile(song.id, file, { logger: context.logger });
+          cachedLyrics = imported.lyrics;
+          await showDetailNotice(`已导入 ${imported.format.toUpperCase()} 歌词`, context);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          await showDetailNotice(`歌词导入失败：${error?.message || '未知错误'}`, context);
+        }
         continue;
       }
       if (/^(?:u|url|链接)$/i.test(action)) {
@@ -901,7 +973,7 @@ async function songMenuInScreen(rl, api, song, context) {
         }
         continue;
       }
-      if (/^(?:p|play|播放)$/i.test(action)) {
+      if (/^(?:\r|\n|p|play|播放)$/i.test(action)) {
         linksVisible = false;
         const returnPageRows = page.transitionRows;
         page.close();
@@ -917,7 +989,7 @@ async function songMenuInScreen(rl, api, song, context) {
 
 export function songDetailPrompt({ loggedIn = false, favorited = false } = {}) {
   const favorite = loggedIn ? ` [f]${favorited ? '取消收藏' : '收藏'}` : '';
-  return `[p]播放 [l]歌词导出 [u]播放链接${favorite} [q]返回 > `;
+  return `[p]播放 [l]歌词导出 [i]导入歌词 [u]播放链接${favorite} [r]刷新 [q]返回 > `;
 }
 
 function playlistCreatorName(playlist) {
@@ -1006,6 +1078,7 @@ async function openDetailPage(rl, render, prompt, keys, context) {
       action,
       close,
       tty,
+      bodyRows: transitionBodyRows,
       transitionRows: detailPageTransitionRows(transitionBodyRows, promptText)
     };
   } catch (error) {
@@ -1034,6 +1107,16 @@ export function detailPageTransitionRows(bodyRows, prompt, rows = output.rows) {
     frame[start + index] = lines[index];
   }
   return frame;
+}
+
+export function detailInlinePromptSequence(bodyRows, prompt, rows = output.rows) {
+  const height = Math.max(1, Math.floor(Number(rows) || 24));
+  let lastContent = -1;
+  for (let index = 0; index < Math.min(height, bodyRows?.length || 0); index += 1) {
+    if (String(bodyRows[index] ?? '').trim()) lastContent = index;
+  }
+  const promptRow = Math.min(height, Math.max(1, lastContent + 3));
+  return `\x1b[${promptRow};1H\x1b[0J\x1b[?25h${prompt}`;
 }
 
 function prepareDetailOverlay(reservedRows) {
@@ -1068,6 +1151,7 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
   }
   const unavailable = new Set();
   const cache = new Map();
+  let applyLyricsRefresh = null;
   const loadTrack = (index) => {
     if (index < 0 || index >= tracks.length) return Promise.resolve(null);
     if (cache.has(index)) return cache.get(index);
@@ -1093,12 +1177,20 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
       unavailable.delete(index);
       let lyrics = { original: '', translated: '', romanized: '', lys: '', qrc: '', yrc: '' };
       try {
-        lyrics = await api.lyrics(song.id, { signal: context.signal });
+        lyrics = await api.lyrics(song.id, {
+          signal: context.signal,
+          onCacheUpdated: (next) => {
+            if (index === activeIndex) {
+              applyLyricsRefresh?.({ lyrics: next, selected: chooseLyricSource(next) });
+            }
+          }
+        });
       } catch (error) {
         if (isAbortError(error)) throw error;
         void context.logger.warn('playlist_lyrics_failed', { songId: song.id, error });
       }
       const selectedLyrics = chooseLyricSource(lyrics);
+      const userState = await readSongUserState(song.id);
       void context.logger.info('lyrics_source_selected', {
         songId: song.id, type: selectedLyrics.type,
         lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || ''),
@@ -1124,6 +1216,7 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
         lyricType: selectedLyrics.type,
         translatedLyricSource: lyrics.translated,
         romanizedLyricSource: lyrics.romanized,
+        lyricOffsetMs: Number.isFinite(userState.lyricOffsetMs) ? userState.lyricOffsetMs : context.settings.lyricOffsetMs,
         favorited: context.authState.loggedIn
           ? await api.isSongLiked(
               context.authState.profile?.userId || context.authState.account?.id,
@@ -1169,7 +1262,8 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
 
   const playback = await playWithProgress({
     ...initial,
-    lyricOffsetMs: context.settings.lyricOffsetMs,
+    lyricOffsetMs: initial.lyricOffsetMs,
+    translationMode: context.settings.translationMode,
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
@@ -1181,6 +1275,23 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     onFavorite: context.authState.loggedIn
       ? (currentSong, operation) => updateLikedPlaylist(api, currentSong, context, operation)
       : undefined,
+    onImportLyrics: async (currentSong, file) => {
+      if (file === '!delete') {
+        await removeUserLyrics(currentSong.id);
+        const lyrics = await api.lyrics(currentSong.id, { signal: context.signal });
+        cache.delete(activeIndex);
+        return { removed: true, lyrics, selected: chooseLyricSource(lyrics) };
+      }
+      const imported = await importLyricsFile(currentSong.id, file, { logger: context.logger });
+      cache.delete(activeIndex);
+      return imported;
+    },
+    onTrackUserStateChange: (currentSong, patch) => updateSongUserState(currentSong.id, patch),
+    onTranslationModeChange: async (translationMode) => {
+      context.settings.translationMode = translationMode;
+      await saveSettings({ ...context.settings, translationMode });
+    },
+    registerLyricsRefresh: (handler) => { applyLyricsRefresh = handler; },
     returnPageRows: context.returnPageRows,
     onInterrupt: () => context.shutdown('playback_ctrl_c'),
     onTrackChange: async (targetIndex, cause, transitionSignal) => {
@@ -1218,14 +1329,24 @@ async function playlistMenu(rl, api, id, context) {
 }
 
 async function playlistMenuInScreen(rl, api, id, context) {
-  const playlist = await api.playlistDetail(id, { signal: context.signal });
+  let playlist;
+  let pendingPlaylist = null;
+  playlist = await api.playlistDetail(id, {
+    signal: context.signal,
+    onCacheUpdated: (next) => {
+      if (playlist) Object.assign(playlist, next);
+      else pendingPlaylist = next;
+    }
+  });
+  if (pendingPlaylist) Object.assign(playlist, pendingPlaylist);
   const previewTracks = playlist.tracks || [];
   let fullTracks = null;
   const loadFullTracks = async () => {
     fullTracks ||= await api.playlistTracks(id, { signal: context.signal });
     return fullTracks;
   };
-  const cover = playlist.cover || playlist.coverImgUrl;
+  let cover = playlist.cover || playlist.coverImgUrl;
+  let forceCoverRefresh = false;
   let linksVisible = false;
   const playlistLinks = [
     `歌单链接：${playlistLink(playlist.id || id)}`,
@@ -1242,11 +1363,13 @@ async function playlistMenuInScreen(rl, api, id, context) {
       diagnosticContext: 'playlist_detail',
       imageCacheMaxBytes: context.settings.cacheMaxBytes,
       imageIdentity: { type: 'playlist-cover', id: playlist.id || id },
+      forceRefresh: forceCoverRefresh,
       preloadedBuffer: pageState.preloadedCoverBuffer,
       deferLoad: true,
       onDeferredReady: pageState.onImageReady,
       onTextRows: (rows) => { transitionCoverRows = rows; }
     }) : 0;
+    forceCoverRefresh = false;
     const transitionRows = [
       '',
       ...transitionCoverRows.slice(0, coverRows),
@@ -1300,20 +1423,32 @@ async function playlistMenuInScreen(rl, api, id, context) {
       rl,
       renderDetail,
       () => detailFooterPrompt(
-        chalk.yellow('[p]播放 [l]歌曲列表 [e]导出列表 [u]歌单链接 [q]返回 > '),
+        chalk.yellow('[p]播放 [l]歌曲列表 [e]导出列表 [u]歌单链接 [r]刷新 [q]返回 > '),
         linksVisible ? playlistLinks : []
       ),
-      ['p', 'l', 'e', 'u', 'q'],
+      ['\r', '\n', 'p', 'l', 'e', 'u', 'r', 'q'],
       context
     );
     const { action: raw } = page;
     try {
     if (/^(?:q|b|back|返回)$/i.test(raw)) return 'back';
+    if (/^(?:r|refresh|刷新)$/i.test(raw)) {
+      linksVisible = false;
+      forceCoverRefresh = true;
+      void api.playlistDetail(id, {
+        forceRevalidate: true,
+        onCacheUpdated: (next) => {
+          Object.assign(playlist, next);
+          cover = playlist.cover || playlist.coverImgUrl;
+        }
+      }).catch((error) => void context.logger.warn('playlist_detail_refresh_failed', { playlistId: id, error }));
+      continue;
+    }
     if (/^(?:u|url|链接)$/i.test(raw)) {
       linksVisible = !linksVisible;
       continue;
     }
-    if (/^(?:p|play|播放)$/i.test(raw)) {
+    if (/^(?:\r|\n|p|play|播放)$/i.test(raw)) {
       linksVisible = false;
       const returnPageRows = page.transitionRows;
       page.close();
@@ -1419,7 +1554,16 @@ async function listUserPlaylistsInScreen(rl, api, context) {
     console.log('无法取得当前用户 ID，请执行 /login status 后重试。');
     return;
   }
-  const playlists = await api.userPlaylists(uid, { signal: context.signal });
+  let playlists;
+  let pendingPlaylists = null;
+  playlists = await api.userPlaylists(uid, {
+    signal: context.signal,
+    onCacheUpdated: (next) => {
+      if (playlists) playlists.splice(0, playlists.length, ...next);
+      else pendingPlaylists = next;
+    }
+  });
+  if (pendingPlaylists) playlists = pendingPlaylists;
   if (!playlists.length) {
     console.log('当前账号没有歌单。');
     return;

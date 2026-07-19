@@ -202,6 +202,7 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
   if (playlistOpen && (key.toLowerCase() === 'q' || key === '\u001b')) return { type: 'close_playlist' };
   if (key.toLowerCase() === 'q') return { type: 'quit' };
   if (key.toLowerCase() === 'r') return { type: 'refresh' };
+  if (key.toLowerCase() === 'i') return { type: 'import_lyrics' };
   if (key.includes('\u001b[1;5D') || key.includes('\u001b[5D')) return { type: 'playlist_previous' };
   if (key.includes('\u001b[1;5C') || key.includes('\u001b[5C')) return { type: 'playlist_next' };
   // Ctrl+方向键必须先于普通方向键和鼠标序列判断，避免被识别为音量或歌单滚动。
@@ -234,8 +235,12 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
 
 export function playbackTerminalModeSequence(entering) {
   return entering
-    ? '\u001b[?1007l\u001b[?1000h\u001b[?1006h'
-    : '\u001b[?1000l\u001b[?1006l\u001b[?1007h';
+    ? `\u001b[?1007l${playbackMouseTrackingSequence(true)}`
+    : `${playbackMouseTrackingSequence(false)}\u001b[?1007h`;
+}
+
+export function playbackMouseTrackingSequence(enabled) {
+  return enabled ? '\u001b[?1000h\u001b[?1006h' : '\u001b[?1000l\u001b[?1006l';
 }
 
 export function playbackEntrySequence(directAnimation = false) {
@@ -313,7 +318,7 @@ export function adjustPlaybackOffset(offsetMs, deltaMs) {
 }
 
 export function createTrackOffsetSession(configuredOffsetMs = 0) {
-  const configured = adjustPlaybackOffset(configuredOffsetMs, 0);
+  let configured = adjustPlaybackOffset(configuredOffsetMs, 0);
   let current = configured;
   return {
     get value() { return current; },
@@ -321,7 +326,8 @@ export function createTrackOffsetSession(configuredOffsetMs = 0) {
       current = adjustPlaybackOffset(current, deltaMs);
       return current;
     },
-    reset() {
+    reset(nextConfiguredOffsetMs = configured) {
+      configured = adjustPlaybackOffset(nextConfiguredOffsetMs, 0);
       current = configured;
       return current;
     }
@@ -353,6 +359,11 @@ export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOff
     ? Math.max(16, Number(animationIntervalMs))
     : Infinity;
   return clamp(Math.min(toNextSecond, toNextLyric, nextSyllable, animationDelay), 16, 1000);
+}
+
+export function playbackImportPromptSequence(rows = process.stdout.rows, prompt = '请输入歌词路径：') {
+  const row = Math.max(1, Math.floor(Number(rows) || 24));
+  return `\x1b[${row};1H\x1b[0J\x1b[?25h${prompt}`;
 }
 
 function truncateText(text, width) {
@@ -449,13 +460,15 @@ export function lyricViewport(lines, elapsedMs, capacity) {
   }
   const hasDurations = lines.some((line) => Number.isFinite(line.endTimeMs));
   const overlapEnabled = hasDurations && capacity >= 3;
-  const active = overlapEnabled
+  let active = overlapEnabled
     ? lines.map((line, index) => ({ line, index }))
-      .filter(({ line }) => line.timeMs <= elapsedMs
-        && (!Number.isFinite(line.endTimeMs) || elapsedMs < line.endTimeMs))
+      .filter(({ line }) => Number.isFinite(line.endTimeMs)
+        && line.timeMs <= elapsedMs && elapsedMs < line.endTimeMs)
       .slice(-3)
       .map(({ index }) => index)
     : (currentIndex >= 0 ? [currentIndex] : []);
+  if (overlapEnabled && !active.length && currentIndex >= 0
+      && !Number.isFinite(lines[currentIndex].endTimeMs)) active = [currentIndex];
   // 播放页只显示当前歌词和之后的歌词，不再保留历史行。
   const start = active.length
     ? Math.min(...active)
@@ -481,20 +494,24 @@ function createLyricInterlude(start, end) {
   };
 }
 
+const MIN_LYRIC_INTERLUDE_MS = 7000;
+
 export function addLyricInterludes(lines) {
   const output = [];
   const first = lines[0];
-  if (first && first.timeMs > 5000) {
-    output.push(createLyricInterlude(0, first.timeMs - 1000));
+  if (first) {
+    const start = 800;
+    const end = first.timeMs - 500;
+    if (end - start >= MIN_LYRIC_INTERLUDE_MS) output.push(createLyricInterlude(start, end));
   }
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     output.push(line);
     const next = lines[index + 1];
-    if (!next || !Number.isFinite(line.endTimeMs) || next.timeMs - line.endTimeMs <= 8000) continue;
-    const start = line.endTimeMs + 2000;
-    const end = next.timeMs - 1000;
-    if (end <= start) continue;
+    if (!next || !Number.isFinite(line.endTimeMs)) continue;
+    const start = line.endTimeMs + 1500;
+    const end = next.timeMs - 500;
+    if (end - start < MIN_LYRIC_INTERLUDE_MS) continue;
     output.push(createLyricInterlude(start, end));
   }
   return output;
@@ -562,11 +579,12 @@ export function lyricTone(line) {
 
 export function renderSyllableText(line, elapsedMs, tone, width = Infinity) {
   if (!Array.isArray(line?.syllables) || !line.syllables.length) return truncateText(line?.text || '', width);
+  if (tone !== 'current') return truncateText(line.syllables.map((syllable) => syllable.text || '').join(''), width);
   const text = line.syllables.map((syllable) => {
     const start = Number(syllable.startTime);
     const end = Number(syllable.endTime);
     const value = syllable.text || '';
-    if (Number.isFinite(start) && Number.isFinite(end) && elapsedMs >= end) return chalk.white(value);
+    if (Number.isFinite(start) && Number.isFinite(end) && elapsedMs >= end) return chalk.rgb(240, 240, 240)(value);
     if (Number.isFinite(start) && elapsedMs >= start) return primaryText(value);
     return secondaryText(value);
   }).join('');
@@ -606,9 +624,9 @@ export function shuffledPlaylistOrder(length, currentIndex, random = Math.random
   return length ? [currentIndex, ...rest] : [];
 }
 
-export function playbackShortcutText({ canFavorite = false, favorited = false, canToggleTranslation = true, hasTranslation = true, hasRomanized = true } = {}) {
+export function playbackShortcutText({ canFavorite = false, favorited = false, canToggleTranslation = true, hasTranslation = true, hasRomanized = true, canImportLyrics = false } = {}) {
   const label = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
-  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? `  t ${label}` : ''}  r 刷新`;
+  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? `  t ${label}` : ''}${canImportLyrics ? '  i 导入歌词' : ''}  r 刷新`;
   return canFavorite ? `${base}  f ${favorited ? '取消收藏' : '收藏'}` : base;
 }
 
@@ -1008,6 +1026,7 @@ function renderDynamic({
   currentLyricOnly = false,
   easterEgg = null,
   canFavorite = false,
+  canImportLyrics = false,
   favorited = false,
   translationMode = 'off',
   canToggleTranslation = true,
@@ -1029,7 +1048,10 @@ function renderDynamic({
   const partial = segments.partial
     ? secondaryBackground(primaryText(segments.partial))
     : '';
-  const bar = `${primaryText(segments.played)}${partial}${secondaryBackground(segments.unplayed)}`;
+  const played = segments.played
+    ? secondaryBackground(primaryText(segments.played))
+    : '';
+  const bar = `${played}${partial}${secondaryBackground(segments.unplayed)}`;
   const progress = playbackProgressText({
     bar,
     timeText,
@@ -1046,7 +1068,9 @@ function renderDynamic({
   const hasTranslation = lyrics.some((line) => Boolean(line.translation));
   const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
   const shortcutLabel = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
-  const shortcutRows = playbackShortcutRows({ canFavorite, favorited, canToggleTranslation, hasTranslation, hasRomanized }, columns).map((row) => {
+  const shortcutRows = playbackShortcutRows({
+    canFavorite, favorited, canToggleTranslation, hasTranslation, hasRomanized, canImportLyrics
+  }, columns).map((row) => {
     const label = translationMode === 'off'
       ? chalk.gray(shortcutLabel)
       : translationMode === 'translated'
@@ -1088,7 +1112,9 @@ function renderDynamic({
           const text = line.syllables?.length
             ? renderSyllableText(line, lyricElapsedMs, tone, columns)
             : truncateText(line.text, columns);
-          const rendered = tone === 'future'
+          const rendered = line.syllables?.length && tone === 'current'
+            ? text
+            : tone === 'future'
             ? secondaryText(text)
             : line.translation
               ? tone === 'current' ? chalk.cyan(text) : chalk.white.dim(text)
@@ -1135,11 +1161,14 @@ function imageBufferFromDataUri(source) {
   return match ? Buffer.from(match[1], 'base64') : null;
 }
 
-async function loadImage(source, signal, { imageCacheMaxBytes, logger, imageIdentity } = {}) {
+async function loadImage(source, signal, {
+  imageCacheMaxBytes, logger, imageIdentity, onUpdated, forceRefresh = false
+} = {}) {
   const inline = imageBufferFromDataUri(source);
   if (inline) return inline;
   return loadCachedImage(source, {
-    signal, maxBytes: imageCacheMaxBytes, logger, identity: imageIdentity
+    signal, maxBytes: imageCacheMaxBytes, logger, identity: imageIdentity,
+    revalidate: Boolean(imageIdentity), forceRevalidate: forceRefresh, onUpdated
   });
 }
 
@@ -1220,7 +1249,7 @@ export function playbackMetadataRows(song, backendLabel, columns, visibleRows = 
   const artists = songArtistsText(song);
   const title = song.name || song.title || '';
   const rows = [
-    chalk.bold(truncateText(title, columns)),
+    chalk.bold.green(truncateText(title, columns)),
     truncateText(`歌手：${artists}`, columns),
     truncateText(`专辑：${song.album || '未知'}`, columns),
     truncateText(`播放器：${backendLabel}`, columns),
@@ -1229,7 +1258,7 @@ export function playbackMetadataRows(song, backendLabel, columns, visibleRows = 
   if (!Number.isFinite(visibleRows)) return rows;
   const count = Math.max(0, Math.floor(Number(visibleRows) || 0));
   if (count === 1) {
-    return [chalk.bold(compactSongArtistText(title, artists, columns))];
+    return [chalk.bold.green(compactSongArtistText(title, artists, columns))];
   }
   return rows.slice(0, count);
 }
@@ -1429,7 +1458,8 @@ export async function tryRenderImage(source, {
   signal, size = 'detail', shouldRender, protocol = 'auto', maxRows, onTextRows,
   allowNativeGraphics = false, preloadedBuffer = null, logger = null,
   diagnosticContext = 'unknown', imageCacheMaxBytes,
-  deferLoad = false, onDeferredReady = null, imageIdentity = null
+  deferLoad = false, onDeferredReady = null, imageIdentity = null,
+  forceRefresh = false
 } = {}) {
   const renderStartedAt = Date.now();
   const common = { context: diagnosticContext, size, requestedProtocol: protocol };
@@ -1464,6 +1494,14 @@ export async function tryRenderImage(source, {
     const immediateBuffer = preloadedBuffer
       ?? imageBufferFromDataUri(source)
       ?? peekCachedImage(source, { identity: imageIdentity });
+    if (immediateBuffer && !preloadedBuffer && imageIdentity) {
+      void loadImage(source, undefined, {
+        imageCacheMaxBytes, logger, imageIdentity, forceRefresh,
+        onUpdated: typeof onDeferredReady === 'function' ? (buffer) => {
+          if (current()) onDeferredReady(buffer);
+        } : null
+      }).catch((error) => mediaLog(logger, 'warn', 'image_revalidate_failed', { ...common, error }));
+    }
     if (deferLoad && !immediateBuffer && typeof onDeferredReady === 'function') {
       void loadImage(source, signal, { imageCacheMaxBytes, logger, imageIdentity }).then((buffer) => {
         if (current()) onDeferredReady(buffer);
@@ -1477,7 +1515,12 @@ export async function tryRenderImage(source, {
     }
     const loadStartedAt = Date.now();
     const buffer = immediateBuffer
-      ?? await loadImage(source, signal, { imageCacheMaxBytes, logger, imageIdentity });
+      ?? await loadImage(source, signal, {
+        imageCacheMaxBytes, logger, imageIdentity,
+        onUpdated: typeof onDeferredReady === 'function' ? (buffer) => {
+          if (current()) onDeferredReady(buffer);
+        } : null
+      });
     mediaLog(logger, 'info', 'image_source_loaded', {
       ...common, durationMs: Date.now() - loadStartedAt, bytes: buffer.length,
       preloaded: Boolean(preloadedBuffer)
@@ -1673,6 +1716,11 @@ export async function playWithProgress({
   onInterrupt,
   onTrackChange,
   onFavorite,
+  onImportLyrics,
+  onTrackUserStateChange,
+  onTranslationModeChange,
+  registerLyricsRefresh,
+  translationMode = 'off',
   favorited = false,
   returnPageRows = []
 }) {
@@ -1709,11 +1757,13 @@ export async function playWithProgress({
   clock.pause();
   const trackOffset = createTrackOffsetSession(lyricOffsetMs);
   let activeOffsetMs = trackOffset.value;
+  const trackOffsets = new Map([[String(activeSong?.id ?? ''), activeOffsetMs]]);
   const activeSmtcOffsetMs = Number.isFinite(Number(smtcOffsetMs)) ? Number(smtcOffsetMs) : 0;
   let volume = 100;
   let userPaused = false;
   let hasTranslation = lyrics.some((line) => Boolean(line.translation));
-  let preferredTranslationMode = 'off';
+  let preferredTranslationMode = ['off', 'translated', 'romanized'].includes(translationMode)
+    ? translationMode : 'off';
   let showTranslation = false;
   let showRomanized = false;
   const applyPreferredTranslation = () => {
@@ -1723,10 +1773,21 @@ export async function playWithProgress({
     showRomanized = preferredTranslationMode === 'romanized' ? hasRomanized
       : preferredTranslationMode === 'translated' ? !hasTranslation && hasRomanized : false;
   };
+  applyPreferredTranslation();
   let indicator = '';
   let playerError = '';
   let indicatorUntil = 0;
   let favoritePending = false;
+  let lyricImportPending = false;
+  let translationModeSave = Promise.resolve();
+  let userStateSave = Promise.resolve();
+  const persistUserState = (patch) => {
+    if (typeof onTrackUserStateChange !== 'function') return;
+    const targetSong = activeSong;
+    userStateSave = userStateSave.then(() => onTrackUserStateChange(targetSong, patch)).catch((error) => {
+      void logger?.warn('song_user_state_save_failed', { songId: targetSong?.id, error });
+    });
+  };
   const favoritedSongIds = new Set(favorited && activeSong?.id != null ? [String(activeSong.id)] : []);
   const playlistTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
   let playlistCurrentIndex = playlistTracks.length
@@ -2017,6 +2078,7 @@ export async function playWithProgress({
         ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen }
         : '',
       canFavorite: typeof onFavorite === 'function',
+      canImportLyrics: typeof onImportLyrics === 'function',
       favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
       compactPausedRow: activeSong.name || activeSong.title || '',
       compactPausedArtist: songArtistsText(activeSong),
@@ -2109,6 +2171,18 @@ export async function playWithProgress({
     indicator = text;
     indicatorUntil = performance.now() + Math.max(0, Number(durationMs) || 0);
   };
+  registerLyricsRefresh?.((next) => {
+    if (!next?.selected) return;
+    lyrics = attachLyricTranslations(
+      next.selected.lines,
+      parseLrc(String(next.lyrics?.translated ?? '')),
+      parseLrc(String(next.lyrics?.romanized ?? ''))
+    );
+    hasTranslation = lyrics.some((line) => Boolean(line.translation));
+    applyPreferredTranslation();
+    setIndicator('歌词缓存已更新');
+    render();
+  });
 
   const runPageTransition = async (operation) => {
     pageTransitionDepth += 1;
@@ -2259,7 +2333,8 @@ export async function playWithProgress({
       : 0;
     const shortcutRowCount = playbackShortcutRows({
       canFavorite: typeof onFavorite === 'function',
-      favorited: favoritedSongIds.has(String(songSnapshot?.id ?? ''))
+      favorited: favoritedSongIds.has(String(songSnapshot?.id ?? '')),
+      canImportLyrics: typeof onImportLyrics === 'function'
     }, terminalColumns).length;
     return planPlaybackVerticalLayout({
       rows: terminalRows,
@@ -2600,7 +2675,10 @@ export async function playWithProgress({
     const nextSongId = String(activeSong?.id ?? '');
     if (next.favorited) favoritedSongIds.add(nextSongId);
     else favoritedSongIds.delete(nextSongId);
-    activeOffsetMs = trackOffset.reset();
+    activeOffsetMs = trackOffset.reset(
+      trackOffsets.get(nextSongId) ?? next.lyricOffsetMs
+    );
+    trackOffsets.set(nextSongId, activeOffsetMs);
     creditsFullPlayerActive = false;
     creditsPlayerHeaderRows = [];
     creditsTransitionHeaderRows = null;
@@ -2878,6 +2956,50 @@ export async function playWithProgress({
       }).finally(() => { favoritePending = false; });
       return;
     }
+    if (action.type === 'import_lyrics' && typeof onImportLyrics === 'function' && !lyricImportPending) {
+      lyricImportPending = true;
+      setIndicator('请输入歌词路径', 60000);
+      render();
+      enqueue(async () => {
+        pageTransitionDepth += 1;
+        try {
+          if (refreshTimer) clearTimeout(refreshTimer);
+          dynamicWriter?.dropPending();
+          process.stdout.write(playbackMouseTrackingSequence(false));
+          restoreInput();
+          restoreInput = () => {};
+          process.stdout.write(playbackImportPromptSequence());
+          const file = String(await rl.question('', { signal })).trim();
+          if (!file || file.toLowerCase() === 'q') {
+            setIndicator('已取消歌词导入');
+            return;
+          }
+          setIndicator('正在导入歌词…', 60000);
+          const imported = await onImportLyrics(activeSong, file);
+          const selected = imported.selected;
+          lyrics = attachLyricTranslations(
+            selected.lines,
+            parseLrc(String(imported.lyrics.translated ?? '')),
+            parseLrc(String(imported.lyrics.romanized ?? ''))
+          );
+          hasTranslation = lyrics.some((line) => Boolean(line.translation));
+          applyPreferredTranslation();
+          setIndicator(imported.removed ? '已删除当前曲目的用户歌词' : `已导入 ${imported.format.toUpperCase()} 歌词`);
+        } catch (error) {
+          if (error?.name !== 'AbortError') setIndicator(`歌词导入失败：${error?.message || '未知错误'}`, 3000);
+        } finally {
+          lyricImportPending = false;
+          pageTransitionDepth = Math.max(0, pageTransitionDepth - 1);
+          if (!finished && !closing) {
+            restoreInput = setupRawInput(rl, handleData);
+            process.stdout.write(`${playbackMouseTrackingSequence(true)}\x1b[?25l\x1b[2J\x1b[H`);
+            await drawHeader(null, { reason: 'lyrics_import' });
+            render();
+          }
+        }
+      });
+      return;
+    }
     if (action.type === 'toggle_pause' || action.action === 'play' || action.action === 'pause') {
       if (sessionEnded && (action.action === 'play' || action.type === 'toggle_pause')) {
         enqueue(async () => {
@@ -2951,7 +3073,9 @@ export async function playWithProgress({
     }
     if (action.type === 'offset') {
       activeOffsetMs = trackOffset.adjust(action.deltaMs);
-      setIndicator(`当前曲目临时偏移 ${activeOffsetMs} ms`);
+      trackOffsets.set(String(activeSong?.id ?? ''), activeOffsetMs);
+      persistUserState({ lyricOffsetMs: activeOffsetMs });
+      setIndicator(`当前曲目偏移 ${activeOffsetMs} ms`);
       updateSmtc(userPaused ? 'paused' : 'playing');
       render();
       return;
@@ -2973,6 +3097,12 @@ export async function playWithProgress({
         showRomanized = true;
       }
       preferredTranslationMode = showRomanized ? 'romanized' : showTranslation ? 'translated' : 'off';
+      if (typeof onTranslationModeChange === 'function') {
+        const mode = preferredTranslationMode;
+        translationModeSave = translationModeSave.then(() => onTranslationModeChange(mode)).catch((error) => {
+          void logger?.warn('translation_mode_save_failed', { error });
+        });
+      }
       setIndicator(showRomanized ? '音译已开启' : showTranslation ? '翻译已开启' : '翻译已关闭');
       render();
     }
@@ -3111,6 +3241,8 @@ export async function playWithProgress({
     flushRenderDiagnostics('playback_end');
     dynamicWriter?.close();
     try {
+      await userStateSave;
+      await translationModeSave;
       await stopCurrent();
       const sharedMediaPlayerBridge = persistentController === smtc;
       if (!retainSmtc || !sharedMediaPlayerBridge) await persistentController?.close();

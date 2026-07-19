@@ -6,6 +6,8 @@ import { configFilePath } from './cookie-store.js';
 const MAX_MEMORY_BYTES = 32 * 1024 * 1024;
 const memory = new Map();
 const inflight = new Map();
+const revalidating = new Map();
+const lastRevalidatedAt = new Map();
 let memoryBytes = 0;
 
 export function dataCacheDirectory(env = process.env, platform = process.platform) {
@@ -27,6 +29,7 @@ const NAMESPACE_TYPES = Object.freeze({
   'song-lyrics-lys': ['Lyrics', 'song', 'lyric.lys'],
   'song-lyrics-lqe': ['Lyrics', 'song', 'lyric.lqe'],
   'song-lyrics-yrc': ['Lyrics', 'song', 'lyric.yrc'],
+  'song-lyrics-import': ['Lyrics', 'song', 'import.json'],
   'song-lyrics-translated': ['Lyrics', 'song', 'trans.lrc'],
   'song-lyrics-romanized': ['Lyrics', 'song', 'roman.lrc'],
   'song-metadata': ['Metadata', 'song', 'metadata'],
@@ -176,6 +179,16 @@ export async function readCachedData(identity, { directory = dataCacheDirectory(
   }
 }
 
+export async function writeCachedData(identity, value, {
+  directory = dataCacheDirectory(), logger = null
+} = {}) {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const key = scopedKey(directory, dataCacheKey(identity));
+  await store(dataCachePath(identity, directory), buffer, Infinity, logger, directory);
+  remember(key, buffer);
+  return dataCachePath(identity, directory);
+}
+
 export async function loadCachedData(identity, {
   signal,
   maxBytes = 100 * 1024 * 1024,
@@ -183,12 +196,38 @@ export async function loadCachedData(identity, {
   logger = null,
   loader,
   validate = () => true,
-  legacyFiles = []
+  legacyFiles = [],
+  revalidate = false,
+  revalidateIntervalMs = 60 * 1000,
+  forceRevalidate = false,
+  onUpdated = null,
+  isEqual = (next, previous) => next.equals(previous),
+  revalidateLoader = loader
 } = {}) {
   if (typeof loader !== 'function') throw new TypeError('缓存 loader 必须是函数');
   maxBytes = maxBytes == null ? Infinity : maxBytes;
   const key = dataCacheKey(identity);
   const memoryId = scopedKey(directory, key);
+  const refresh = (previous) => {
+    if (!revalidate || (!forceRevalidate
+        && Date.now() - (lastRevalidatedAt.get(memoryId) || 0) < revalidateIntervalMs)) return;
+    if (revalidating.has(memoryId)) return;
+    lastRevalidatedAt.set(memoryId, Date.now());
+    const task = Promise.resolve().then(async () => {
+      const buffer = Buffer.from(await revalidateLoader());
+      if (!validate(buffer)) throw Object.assign(new Error('后台刷新的缓存内容无效'), { code: 'INVALID_CACHE' });
+      if (isEqual(buffer, previous)) return;
+      await store(dataCachePath(identity, directory), buffer, maxBytes, logger, directory);
+      remember(memoryId, buffer);
+      void logger?.info('data_cache_revalidated', { type: identity.type, bytes: buffer.length });
+      try { onUpdated?.(buffer, previous); } catch (error) {
+        void logger?.warn('data_cache_update_callback_failed', { type: identity.type, error });
+      }
+    }).catch((error) => {
+      void logger?.warn('data_cache_revalidate_failed', { type: identity.type, error });
+    }).finally(() => revalidating.delete(memoryId));
+    revalidating.set(memoryId, task);
+  };
   const memoryHit = memory.get(memoryId);
   if (memoryHit) {
     memory.delete(memoryId);
@@ -198,6 +237,7 @@ export async function loadCachedData(identity, {
       layer: 'memory', type: identity.type, key: key.slice(0, 12),
       variant: identity.variant ?? 'default', bytes: memoryHit.length, path: dataCachePath(identity, directory)
     });
+    refresh(memoryHit);
     return waitForConsumer(Promise.resolve(memoryHit), signal);
   }
   let shared = inflight.get(memoryId);
@@ -216,6 +256,7 @@ export async function loadCachedData(identity, {
               path: candidate
             });
             if (legacy) await store(primary, buffer, maxBytes, logger, directory);
+            refresh(buffer);
             return buffer;
           } catch (error) {
             if (!['ENOENT', 'INVALID_CACHE'].includes(error.code)) {
@@ -290,6 +331,16 @@ async function removeBestEffort(target) {
   for (const entry of entries) await removeBestEffort(path.join(target, entry.name));
 }
 
+async function clearLyricsCachePreservingImports(target) {
+  let entries = [];
+  try { entries = await readdir(target, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const child = path.join(target, entry.name);
+    if (entry.isDirectory() && entry.name.toLowerCase() === 'userlyrics') continue;
+    await removeBestEffort(child);
+  }
+}
+
 export async function clearDataCache(group, directory = dataCacheDirectory()) {
   if (!['covers', 'musics', 'other'].includes(group)) {
     throw new Error('缓存分类必须是 covers、musics 或 other');
@@ -302,7 +353,9 @@ export async function clearDataCache(group, directory = dataCacheDirectory()) {
     try { entries = await readdir(directory, { withFileTypes: true }); } catch {}
     for (const entry of entries) {
       if (!entry.isDirectory() || ['covers', 'musics'].includes(entry.name.toLowerCase())) continue;
-      await removeBestEffort(path.join(directory, entry.name));
+      const target = path.join(directory, entry.name);
+      if (entry.name.toLowerCase() === 'lyrics') await clearLyricsCachePreservingImports(target);
+      else await removeBestEffort(target);
     }
     // 日志与数据缓存同属本地运行产物，归入 other 一并清理。
     await removeBestEffort(path.join(path.dirname(configFilePath()), 'logs'));

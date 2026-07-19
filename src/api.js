@@ -83,7 +83,10 @@ export class NcmApi {
   }
 
   cacheOptions(options = {}) {
-    return { signal: options.signal, maxBytes: this.cacheMaxBytes, logger: this.logger };
+    return {
+      signal: options.signal, maxBytes: this.cacheMaxBytes, logger: this.logger,
+      onCacheUpdated: options.onCacheUpdated, forceRevalidate: options.forceRevalidate
+    };
   }
 
   async request(endpoint, params = {}, { timeoutMs = 20000, signal } = {}) {
@@ -145,8 +148,8 @@ export class NcmApi {
   }
 
   async songDetail(id, options = {}) {
-    return loadCachedJson({ type: 'song-metadata', id }, async () => {
-      const { data } = await this.request('/song/detail', { ids: id }, options);
+    return loadCachedJson({ type: 'song-metadata', id }, async ({ background = false } = {}) => {
+      const { data } = await this.request('/song/detail', { ids: id }, background ? { ...options, signal: undefined } : options);
       const raw = data.songs?.[0];
       if (!raw) throw new Error(`没有找到歌曲 ID ${id}`);
       return normalizeSong(raw);
@@ -162,14 +165,15 @@ export class NcmApi {
     } = options;
     const pageSize = Math.max(1, Math.min(1000, Math.trunc(Number(requestedPageSize)) || 1000));
     const maxPlaylists = Math.max(1, Math.min(10000, Math.trunc(Number(requestedMaxPlaylists)) || 10000));
-    return loadCachedJson({ type: 'user-playlists-metadata', id: uid }, async () => {
+    return loadCachedJson({ type: 'user-playlists-metadata', id: uid }, async ({ background = false } = {}) => {
+    const activeRequestOptions = background ? { ...requestOptions, signal: undefined } : requestOptions;
     const playlists = [];
     const seenIds = new Set();
     let offset = 0;
 
     while (offset < maxPlaylists) {
       const limit = Math.min(pageSize, maxPlaylists - offset);
-      const { data } = await this.request('/user/playlist', { uid, limit, offset }, requestOptions);
+      const { data } = await this.request('/user/playlist', { uid, limit, offset }, activeRequestOptions);
       const page = Array.isArray(data.playlist) ? data.playlist : [];
       let added = 0;
       for (const raw of page) {
@@ -193,8 +197,8 @@ export class NcmApi {
   }
 
   async playlistDetail(id, options = {}) {
-    return loadCachedJson({ type: 'playlist-metadata', id }, async () => {
-      const { data } = await this.request('/playlist/detail', { id }, options);
+    return loadCachedJson({ type: 'playlist-metadata', id }, async ({ background = false } = {}) => {
+      const { data } = await this.request('/playlist/detail', { id }, background ? { ...options, signal: undefined } : options);
       if (!data.playlist) throw new Error(`没有找到歌单 ID ${id}`);
       return normalizePlaylist(data.playlist);
     }, { ...this.cacheOptions(options), ttlMs: 10 * 60 * 1000 });
@@ -208,13 +212,14 @@ export class NcmApi {
     } = options;
     const pageSize = Math.max(1, Math.min(1000, Math.trunc(Number(requestedPageSize)) || 500));
     const maxTracks = Math.max(1, Math.min(10000, Math.trunc(Number(requestedMaxTracks)) || 10000));
-    return loadCachedJson({ type: 'playlist-tracks-metadata', id }, async () => {
+    return loadCachedJson({ type: 'playlist-tracks-metadata', id }, async ({ background = false } = {}) => {
+    const activeRequestOptions = background ? { ...requestOptions, signal: undefined } : requestOptions;
     const tracks = [];
     const seenIds = new Set();
 
     for (let offset = 0; offset < maxTracks; offset += pageSize) {
       const limit = Math.min(pageSize, maxTracks - offset);
-      const { data } = await this.request('/playlist/track/all', { id, limit, offset }, requestOptions);
+      const { data } = await this.request('/playlist/track/all', { id, limit, offset }, activeRequestOptions);
       const page = Array.isArray(data.songs) ? data.songs : [];
       let added = 0;
       for (const raw of page) {
@@ -232,13 +237,14 @@ export class NcmApi {
   }
 
   async lyrics(id, options = {}) {
-    return loadCachedLyrics(id, async () => {
+    return loadCachedLyrics(id, async ({ background = false } = {}) => {
+      const requestOptions = background ? { ...options, signal: undefined } : options;
       let data;
       try {
-        ({ data } = await this.request('/lyric/new', { id }, options));
+        ({ data } = await this.request('/lyric/new', { id }, requestOptions));
       } catch (error) {
         void this.logger?.warn('lyrics_new_failed_fallback', { songId: id, error });
-        ({ data } = await this.request('/lyric', { id }, options));
+        ({ data } = await this.request('/lyric', { id }, requestOptions));
       }
       void this.logger?.info('lyrics_new_payload', { songId: id,
         hasYrc: Boolean(data.yrc?.lyric || data.klyric?.lyric),
