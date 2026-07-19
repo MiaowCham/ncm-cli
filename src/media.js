@@ -1679,6 +1679,7 @@ export async function playWithProgress({
       : preferredTranslationMode === 'translated' ? !hasTranslation && hasRomanized : false;
   };
   let indicator = '';
+  let playerError = '';
   let indicatorUntil = 0;
   let favoritePending = false;
   const favoritedSongIds = new Set(favorited && activeSong?.id != null ? [String(activeSong.id)] : []);
@@ -1809,14 +1810,22 @@ export async function playWithProgress({
     updateSmtc('playing', positionMs);
     void logger?.info('player_spawn', { player: player.command, pid: instance.pid, positionMs });
     instance.once('error', (error) => {
-      if (!finished && !intentionalStops.has(instance)) rejectCompletion(error);
+      if (!finished && !intentionalStops.has(instance)) {
+        child = null; sessionEnded = true; if (!clock.paused) clock.pause();
+        playerError = error?.message || '播放器启动失败';
+        setIndicator(`播放器异常：${playerError}，按空格重启`); render();
+      }
     });
     instance.once('exit', (code, exitSignal) => {
       void logger?.info('player_exit', { player: player.command, code, signal: exitSignal });
       if (!finished && child === instance && !intentionalStops.has(instance)) {
         child = null;
         if (code === 0 && !exitSignal) enqueue(() => handleNaturalEnd());
-        else rejectCompletion(new Error(`${player.command} 异常退出（code=${code}, signal=${exitSignal || 'none'}）`));
+        else {
+          sessionEnded = true; if (!clock.paused) clock.pause();
+          playerError = `${player.command} 异常退出（code=${code}, signal=${exitSignal || 'none'}）`;
+          setIndicator(`播放器异常：${playerError}，按空格重启`); render();
+        }
       }
     });
   };
@@ -2797,6 +2806,7 @@ export async function playWithProgress({
         enqueue(async () => {
           if (closing) return;
           userPaused = false;
+          playerError = '';
           clock.seekTo(0);
           await spawnAt(0);
           clock.resume();
