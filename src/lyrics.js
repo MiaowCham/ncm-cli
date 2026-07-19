@@ -92,7 +92,12 @@ export function parseLyricifySyllable(source = '') {
 }
 
 export function parseYrc(source = '') {
-  return parseSyllableLines(String(source).replace(/^\{.*\}\s*$/gm, ''));
+  let text = String(source);
+  try {
+    const payload = JSON.parse(text);
+    text = payload?.yrc?.lyric || payload?.lyric || text;
+  } catch { /* 原始逐行 YRC */ }
+  return parseSyllableLines(text.replace(/^\{.*\}\s*$/gm, ''));
 }
 
 export function chooseLyricSource(input = {}) {

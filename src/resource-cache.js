@@ -48,7 +48,15 @@ export async function loadCachedLyrics(id, loader, options = {}) {
     try {
       const file = dataCachePath({ type, id }, options.directory);
       const value = await readFile(file, 'utf8');
-      if (value.length > 0) return value;
+      if (value.length > 0) {
+        if (type === 'song-lyrics-yrc') {
+          try {
+            const payload = JSON.parse(value);
+            if (payload?.yrc?.lyric) return payload.yrc.lyric;
+          } catch { /* 原始 YRC 文本 */ }
+        }
+        return value;
+      }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
