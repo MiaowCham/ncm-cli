@@ -233,7 +233,13 @@ export class NcmApi {
 
   async lyrics(id, options = {}) {
     return loadCachedLyrics(id, async () => {
-      const { data } = await this.request('/lyric/new', { id }, options);
+      let data;
+      try {
+        ({ data } = await this.request('/lyric/new', { id }, options));
+      } catch (error) {
+        void this.logger?.warn('lyrics_new_failed_fallback', { songId: id, error });
+        ({ data } = await this.request('/lyric', { id }, options));
+      }
       void this.logger?.info('lyrics_new_payload', { songId: id,
         hasYrc: Boolean(data.yrc?.lyric || data.klyric?.lyric),
         hasTranslated: Boolean(data.ytlrc?.lyric || data.tlyric?.lyric),

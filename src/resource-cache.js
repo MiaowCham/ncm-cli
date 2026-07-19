@@ -32,7 +32,8 @@ export async function loadCachedJson(identity, loader, {
         lyrics: {
           original: path.relative(path.dirname(configFilePath()), dataCachePath({ type: 'song-lyrics', id: identity.id }, directory)),
           translated: path.relative(path.dirname(configFilePath()), dataCachePath({ type: 'song-lyrics-translated', id: identity.id }, directory)),
-          romanized: path.relative(path.dirname(configFilePath()), dataCachePath({ type: 'song-lyrics-romanized', id: identity.id }, directory))
+          romanized: path.relative(path.dirname(configFilePath()), dataCachePath({ type: 'song-lyrics-romanized', id: identity.id }, directory)),
+          yrc: path.relative(path.dirname(configFilePath()), dataCachePath({ type: 'song-lyrics-yrc', id: identity.id }, directory))
         }
       } : undefined,
       payload: await loader()
@@ -96,12 +97,13 @@ export async function loadCachedLyrics(id, loader, options = {}) {
     }
   };
 
-  const [original, translated, romanized] = await Promise.all([
+  const [original, translated, romanized, yrc] = await Promise.all([
     loadTrack('song-lyrics', 'original'),
     loadTrack('song-lyrics-translated', 'translated'),
-    loadTrack('song-lyrics-romanized', 'romanized')
+    loadTrack('song-lyrics-romanized', 'romanized'),
+    loadTrack('song-lyrics-yrc', 'yrc')
   ]);
-  return { original, translated, romanized, lys: '', qrc: '', yrc: '' };
+  return { original, translated, romanized, lys: '', qrc: '', yrc };
 }
 
 export async function cacheSongMusic(id, source, options = {}) {
