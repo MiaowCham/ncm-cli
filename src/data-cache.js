@@ -294,6 +294,8 @@ export async function clearDataCache(group, directory = dataCacheDirectory()) {
       if (!entry.isDirectory() || ['covers', 'musics'].includes(entry.name.toLowerCase())) continue;
       await rm(path.join(directory, entry.name), { recursive: true, force: true });
     }
+    // 日志与数据缓存同属本地运行产物，归入 other 一并清理。
+    await rm(path.join(path.dirname(configFilePath()), 'logs'), { recursive: true, force: true });
   }
   for (const [key, buffer] of memory) {
     if (!key.startsWith(`${path.resolve(directory)}\0`)) continue;

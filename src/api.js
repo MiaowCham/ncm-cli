@@ -233,10 +233,14 @@ export class NcmApi {
 
   async lyrics(id, options = {}) {
     return loadCachedLyrics(id, async () => {
-      const { data } = await this.request('/lyric', { id }, options);
+      const { data } = await this.request('/lyric/new', { id }, options);
+      void this.logger?.info('lyrics_new_payload', { songId: id,
+        hasYrc: Boolean(data.yrc?.lyric || data.klyric?.lyric),
+        hasTranslated: Boolean(data.ytlrc?.lyric || data.tlyric?.lyric),
+        hasRomanized: Boolean(data.yromalrc?.lyric || data.romalrc?.lyric) });
       return {
-        original: data.lrc?.lyric || '', translated: data.tlyric?.lyric || '',
-        romanized: data.romalrc?.lyric || '',
+        original: data.lrc?.lyric || '', translated: data.ytlrc?.lyric || data.tlyric?.lyric || '',
+        romanized: data.yromalrc?.lyric || data.romalrc?.lyric || '',
         // 网易接口通常将逐字歌词命名为 klyric，部分兼容服务使用 yrc。
         yrc: data.yrc?.lyric || data.klyric?.lyric || ''
       };

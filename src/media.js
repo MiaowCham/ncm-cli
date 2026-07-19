@@ -567,8 +567,9 @@ export function shuffledPlaylistOrder(length, currentIndex, random = Math.random
   return length ? [currentIndex, ...rest] : [];
 }
 
-export function playbackShortcutText({ canFavorite = false, favorited = false, canToggleTranslation = true } = {}) {
-  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? '  t 译/音' : ''}  r 刷新`;
+export function playbackShortcutText({ canFavorite = false, favorited = false, canToggleTranslation = true, hasTranslation = true, hasRomanized = true } = {}) {
+  const label = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
+  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? `  t ${label}` : ''}  r 刷新`;
   return canFavorite ? `${base}  f ${favorited ? '取消收藏' : '收藏'}` : base;
 }
 
@@ -1003,13 +1004,16 @@ function renderDynamic({
         playlistOpen: playbackModeText.playlistOpen
       }, columns).map((row) => chalk.magentaBright(row))
     : [];
-  const shortcutRows = playbackShortcutRows({ canFavorite, favorited, canToggleTranslation }, columns).map((row) => {
+  const hasTranslation = lyrics.some((line) => Boolean(line.translation));
+  const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
+  const shortcutLabel = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
+  const shortcutRows = playbackShortcutRows({ canFavorite, favorited, canToggleTranslation, hasTranslation, hasRomanized }, columns).map((row) => {
     const label = translationMode === 'off'
-      ? chalk.gray('译/音')
+      ? chalk.gray(shortcutLabel)
       : translationMode === 'translated'
-        ? `${chalk.cyanBright('译')}${chalk.gray('/音')}`
-        : `${chalk.gray('译/')}\x1b[1m${chalk.cyanBright('音')}`;
-    return chalk.cyanBright(row.replace('t 译/音', `t ${label}`));
+        ? `${chalk.cyanBright('译')}${hasRomanized ? chalk.gray('/音') : ''}`
+        : `${hasTranslation ? chalk.gray('译/') : ''}\x1b[1m${chalk.cyanBright('音')}`;
+    return chalk.cyanBright(row.replace(`t ${shortcutLabel}`, `t ${label}`));
   });
   if (playlistOpen) {
     const outputRows = playbackPlaylistOverlayRows({
