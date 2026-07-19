@@ -479,7 +479,12 @@ export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation, w
   const rowsFor = (line, includeTranslation = true) => {
     const wrap = (text, translation) => (Number.isFinite(width) ? wrapTerminalText(text, width) : [text])
       .map((part, index) => ({
-        text: part, played: line.played, current: line.current, translation, continuation: index > 0
+        text: part,
+        played: line.played,
+        current: line.current,
+        translation,
+        continuation: index > 0,
+        ...(translation || index > 0 ? {} : { syllables: line.syllables })
       }));
     const rows = wrap(line.text, false);
     if (includeTranslation && showTranslation && line.translation) {
