@@ -440,7 +440,9 @@ export function lyricViewport(lines, elapsedMs, capacity) {
       .map(({ index }) => index)
     : (currentIndex >= 0 ? [currentIndex] : []);
   // 播放页只显示当前歌词和之后的歌词，不再保留历史行。
-  const start = active.length ? Math.min(...active) : Math.max(0, currentIndex);
+  const start = active.length
+    ? Math.min(...active)
+    : (overlapEnabled ? Math.max(0, currentIndex + 1) : Math.max(0, currentIndex));
   return lines.slice(start, start + capacity).map((line, offset) => ({
     ...line,
     played: start + offset <= currentIndex,

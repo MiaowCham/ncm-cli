@@ -40,7 +40,7 @@ function parseSyllableLines(source = '') {
   const output = [];
   for (const raw of String(source).split(/\r?\n/)) {
     const line = raw.trim();
-    const match = line.match(SYLLABLE_LINE);
+    const match = line.match(SYLLABLE_LINE) || line.match(/^<(?:(\d+),(\d+))>(.*)$/);
     if (!match) continue;
     const lineStart = Number(match[1]);
     const lineEnd = lineStart + Number(match[2]);
@@ -86,7 +86,9 @@ export function currentLyric(lines, elapsedMs) {
 export function plainLyrics(source = '') {
   return source
     .split(/\r?\n/)
-    .map((line) => line.replace(/^(?:\[[^\]]+\])+\s*/, ''))
+    .map((line) => line
+      .replace(/^(?:\[[^\]]+\])+\s*/, '')
+      .replace(/\[[0-9]{1,3}:[0-9]{1,2}(?::[0-9]{1,2})?(?:\.[0-9]{1,3})?\]\s*$/, ''))
     .filter(Boolean)
     .join('\n');
 }
