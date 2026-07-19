@@ -236,7 +236,9 @@ export class NcmApi {
       const { data } = await this.request('/lyric', { id }, options);
       return {
         original: data.lrc?.lyric || '', translated: data.tlyric?.lyric || '',
-        romanized: data.romalrc?.lyric || ''
+        romanized: data.romalrc?.lyric || '',
+        // 网易接口通常将逐字歌词命名为 klyric，部分兼容服务使用 yrc。
+        yrc: data.yrc?.lyric || data.klyric?.lyric || ''
       };
     }, this.cacheOptions(options));
   }

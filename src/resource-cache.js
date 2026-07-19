@@ -54,6 +54,16 @@ export async function loadCachedLyrics(id, loader, options = {}) {
     }
     return null;
   };
+  const localFormats = await Promise.all([
+    ['song-lyrics-lys', 'lys'], ['song-lyrics-qrc', 'qrc'], ['song-lyrics-yrc', 'yrc']
+  ].map(async ([type, field]) => [field, await readLocal(type)]));
+  const local = Object.fromEntries(localFormats);
+  if (local.lys || local.qrc || local.yrc) {
+    const original = await readLocal('song-lyrics');
+    const translated = await readLocal('song-lyrics-translated');
+    const romanized = await readLocal('song-lyrics-romanized');
+    return { original: original || '', translated: translated || '', romanized: romanized || '', ...local };
+  }
   const loadTrack = async (type, field) => {
     const local = await readLocal(type);
     if (local != null) {
@@ -78,7 +88,7 @@ export async function loadCachedLyrics(id, loader, options = {}) {
     loadTrack('song-lyrics-translated', 'translated'),
     loadTrack('song-lyrics-romanized', 'romanized')
   ]);
-  return { original, translated, romanized };
+  return { original, translated, romanized, lys: '', qrc: '', yrc: '' };
 }
 
 export async function cacheSongMusic(id, source, options = {}) {

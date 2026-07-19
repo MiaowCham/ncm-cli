@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import supportsTerminalGraphics from 'supports-terminal-graphics';
-import { parseLrc } from './lyrics.js';
+import { parseLrc, parseQrc, parseYrc, parseLyricifySyllable } from './lyrics.js';
 import { loadCachedImage, peekCachedImage } from './image-cache.js';
 import { createMpvController } from './mpv-controller.js';
 import { createSmtcBridge } from './smtc.js';
@@ -501,6 +501,19 @@ export function lyricTone(line) {
   if (line.current) return 'current';
   if (line.played) return 'played';
   return 'future';
+}
+
+export function renderSyllableText(line, elapsedMs, tone, width = Infinity) {
+  if (!Array.isArray(line?.syllables) || !line.syllables.length) return truncateText(line?.text || '', width);
+  const text = line.syllables.map((syllable) => {
+    const start = Number(syllable.startTime);
+    const end = Number(syllable.endTime);
+    const value = syllable.text || '';
+    if (Number.isFinite(start) && Number.isFinite(end) && elapsedMs >= end) return chalk.white(value);
+    if (Number.isFinite(start) && elapsedMs >= start) return chalk.cyan(value);
+    return secondaryText(value);
+  }).join('');
+  return width === Infinity ? text : truncateText(text, width);
 }
 
 export function playlistViewport(tracks, selectedIndex, currentIndex, capacity) {
@@ -1010,8 +1023,10 @@ function renderDynamic({
     );
     const lyricRows = displayRows.length
       ? displayRows.map((line) => {
-          const text = truncateText(line.text, columns);
           const tone = lyricTone(line);
+          const text = line.syllables?.length
+            ? renderSyllableText(line, lyricElapsedMs, tone, columns)
+            : truncateText(line.text, columns);
           const rendered = tone === 'future'
             ? secondaryText(text)
             : line.translation
@@ -1576,6 +1591,7 @@ export async function playWithProgress({
   url,
   durationMs,
   lyricSource = '',
+  lyricType = 'lrc',
   translatedLyricSource = '',
   romanizedLyricSource = '',
   lyricOffsetMs = 0,
@@ -1613,7 +1629,10 @@ export async function playWithProgress({
   let activeSong = song;
   let activeUrl = url;
   let activeDurationMs = durationMs;
-  let lyrics = attachLyricTranslations(parseLrc(lyricSource), parseLrc(translatedLyricSource), parseLrc(romanizedLyricSource));
+  const parseSelected = lyricType === 'lys' ? parseLyricifySyllable
+    : lyricType === 'qrc' ? parseQrc
+      : lyricType === 'yrc' ? parseYrc : parseLrc;
+  let lyrics = attachLyricTranslations(parseSelected(lyricSource), parseLrc(translatedLyricSource), parseLrc(romanizedLyricSource));
   let clock = createPlaybackClock(activeDurationMs);
   // 创建 bridge、下载封面等准备工作不应计入真实播放位置。
   clock.pause();
@@ -2467,8 +2486,11 @@ export async function playWithProgress({
     creditsTransitionHeaderRows = null;
     activeUrl = next.url;
     activeDurationMs = Math.max(0, Number(next.durationMs ?? next.song.durationMs) || 0);
+    const nextParser = next.lyricType === 'lys' ? parseLyricifySyllable
+      : next.lyricType === 'qrc' ? parseQrc
+        : next.lyricType === 'yrc' ? parseYrc : parseLrc;
     lyrics = Array.isArray(next.lyrics) ? next.lyrics : attachLyricTranslations(
-      parseLrc(next.lyricSource ?? next.lyrics?.original ?? ''),
+      nextParser(next.lyricSource ?? next.lyrics?.original ?? ''),
       parseLrc(next.translatedLyricSource ?? next.lyrics?.translated ?? ''),
       parseLrc(next.romanizedLyricSource ?? next.lyrics?.romanized ?? '')
     );

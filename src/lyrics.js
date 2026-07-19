@@ -1,5 +1,8 @@
 const TIME_TAG = /\[(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?(?:\.(\d{1,3}))?\]/g;
 
+const SYLLABLE_LINE = /^\[(\d+),(\d+)\](.*)$/;
+const SYLLABLE_TOKEN = /(.*?)\((\d+),(\d+)\)/g;
+
 function tagTimeMs(tag, offset) {
   const major = Number(tag[1]);
   const minor = Number(tag[2]);
@@ -31,6 +34,44 @@ export function parseLrc(source = '') {
     }
   }
   return lines.sort((a, b) => a.timeMs - b.timeMs);
+}
+
+function parseSyllableLines(source = '') {
+  const output = [];
+  for (const raw of String(source).split(/\r?\n/)) {
+    const line = raw.trim();
+    const match = line.match(SYLLABLE_LINE);
+    if (!match) continue;
+    const lineStart = Number(match[1]);
+    const lineEnd = lineStart + Number(match[2]);
+    const syllables = [];
+    let token;
+    SYLLABLE_TOKEN.lastIndex = 0;
+    while ((token = SYLLABLE_TOKEN.exec(match[3]))) {
+      const start = Number(token[2]);
+      syllables.push({ text: token[1], startTime: start, endTime: start + Number(token[3]) });
+    }
+    const text = syllables.length ? syllables.map((item) => item.text).join('') : match[3];
+    if (text) output.push({ timeMs: lineStart, endTimeMs: lineEnd, text, syllables });
+  }
+  return output;
+}
+
+export function parseQrc(source = '') { return parseSyllableLines(source); }
+
+export function parseLyricifySyllable(source = '') {
+  return parseSyllableLines(String(source).replace(/^\[\d+\]/gm, ''));
+}
+
+export function parseYrc(source = '') {
+  return parseSyllableLines(String(source).replace(/^\{.*\}\s*$/gm, ''));
+}
+
+export function chooseLyricSource({ lys = '', qrc = '', yrc = '', original = '' } = {}) {
+  if (lys.trim()) return { source: lys, type: 'lys', lines: parseLyricifySyllable(lys) };
+  if (qrc.trim()) return { source: qrc, type: 'qrc', lines: parseQrc(qrc) };
+  if (yrc.trim()) return { source: yrc, type: 'yrc', lines: parseYrc(yrc) };
+  return { source: original, type: 'lrc', lines: parseLrc(original) };
 }
 
 export function currentLyric(lines, elapsedMs) {

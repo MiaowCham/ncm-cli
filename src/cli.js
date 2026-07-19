@@ -13,6 +13,7 @@ import { readTerminalKey, selectTerminalList } from './terminal-list.js';
 import { acquireTerminalScreen } from './terminal-screen.js';
 import { secondaryText } from './terminal-theme.js';
 import { resolveNeteaseMusicInput } from './music-link.js';
+import { chooseLyricSource } from './lyrics.js';
 import { writeExport } from './output-file.js';
 import { cleanupStalePlayerSessions } from './player-registry.js';
 import { cacheSongMusic } from './resource-cache.js';
@@ -759,6 +760,7 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     return cachedLyrics;
   }
   const lyrics = cachedLyrics || await api.lyrics(song.id, { signal });
+  const selectedLyrics = chooseLyricSource(lyrics);
   if (!playbackUrl) try {
     playbackUrl = await cacheSongMusic(song.id, result.url, {
       signal, maxBytes: context.settings.cacheMaxBytes, logger
@@ -778,7 +780,8 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     song,
     url: playbackUrl,
     durationMs: song.durationMs,
-    lyricSource: lyrics.original,
+    lyricSource: selectedLyrics.source,
+    lyricType: selectedLyrics.type,
     translatedLyricSource: lyrics.translated,
     romanizedLyricSource: lyrics.romanized,
     favorited,
@@ -1080,13 +1083,14 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
         return null;
       }
       unavailable.delete(index);
-      let lyrics = { original: '', translated: '' };
+      let lyrics = { original: '', translated: '', romanized: '', lys: '', qrc: '', yrc: '' };
       try {
         lyrics = await api.lyrics(song.id, { signal: context.signal });
       } catch (error) {
         if (isAbortError(error)) throw error;
         void context.logger.warn('playlist_lyrics_failed', { songId: song.id, error });
       }
+      const selectedLyrics = chooseLyricSource(lyrics);
       if (!playbackUrl) try {
         playbackUrl = await cacheSongMusic(song.id, result.url, {
           signal: context.signal, maxBytes: context.settings.cacheMaxBytes, logger: context.logger
@@ -1100,7 +1104,8 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
         song,
         url: playbackUrl,
         durationMs: song.durationMs,
-        lyricSource: lyrics.original,
+        lyricSource: selectedLyrics.source,
+        lyricType: selectedLyrics.type,
         translatedLyricSource: lyrics.translated,
         romanizedLyricSource: lyrics.romanized,
         favorited: context.authState.loggedIn
