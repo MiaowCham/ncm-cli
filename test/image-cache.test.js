@@ -65,9 +65,15 @@ test('磁盘缓存超过隐藏容量设置后淘汰旧文件', async () => {
       maxBytes: 100,
       fetchImpl: async () => imageResponse(Buffer.alloc(80, 1))
     };
-    await loadCachedImage('https://example.test/cover-c.png', options);
+    await loadCachedImage('https://example.test/cover-c.png', {
+      ...options,
+      identity: { type: 'track-cover', id: 'cover-c' }
+    });
     await new Promise((resolve) => setTimeout(resolve, 5));
-    await loadCachedImage('https://example.test/cover-d.png', options);
+    await loadCachedImage('https://example.test/cover-d.png', {
+      ...options,
+      identity: { type: 'track-cover', id: 'cover-d' }
+    });
     assert.equal((await readdir(directory, { recursive: true })).filter((name) => /\.(?:cache|png|lrc)$/.test(name)).length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });

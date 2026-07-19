@@ -307,7 +307,7 @@ test('用户歌单标准化，并将喜欢的音乐稳定置顶', async () => {
   await once(server, 'listening');
   try {
     const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
-    const playlists = await api.userPlaylists('7');
+    const playlists = await api.userPlaylists('7', { username: '测试', forceRevalidate: true });
     assert.deepEqual(playlists.map((playlist) => playlist.id), ['2', '4', '1', '3']);
     assert.equal(playlists[0].cover, 'https://img.test/2.jpg');
     assert.deepEqual(playlists[2].creator, { id: '7', nickname: '用户', avatar: null });
@@ -325,7 +325,7 @@ test('用户歌单按 more 分页，并在重复页停止', async () => {
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, 'http://localhost');
     assert.equal(url.pathname, '/user/playlist');
-    assert.equal(url.searchParams.get('uid'), '7');
+    assert.equal(url.searchParams.get('uid'), '8');
     assert.equal(url.searchParams.get('limit'), '2');
     const offset = Number(url.searchParams.get('offset'));
     offsets.push(offset);
@@ -341,7 +341,11 @@ test('用户歌单按 more 分页，并在重复页停止', async () => {
   await once(server, 'listening');
   try {
     const api = new NcmApi({ baseUrl: `http://127.0.0.1:${server.address().port}` });
-    const playlists = await api.userPlaylists('7', { pageSize: 2 });
+    const playlists = await api.userPlaylists('8', {
+      pageSize: 2,
+      username: '用户',
+      forceRevalidate: true
+    });
     assert.deepEqual(offsets, [0, 2, 4]);
     assert.deepEqual(playlists.map((playlist) => playlist.id), ['3', '1', '2', '4']);
   } finally {
