@@ -175,6 +175,10 @@ export function playerBackendLabel(command, { persistent = ['mpv', 'vlc', 'cvlc'
   return String(command);
 }
 
+function isRecoverablePlayerError(error, controller) {
+  return Boolean(controller && /(?:mpv|vlc|ipc|播放器)/iu.test(String(error?.message || error || '')));
+}
+
 export function playerCommandsForBackend(backend = 'auto', { platform = process.platform } = {}) {
   if (backend === 'mpv') return ['mpv'];
   if (backend === 'vlc') return ['vlc', 'cvlc'];
@@ -416,6 +420,72 @@ export function wrapTerminalText(text, width) {
   return rows;
 }
 
+/** 为逐字歌词换行并保留每个视觉行的时间片；英文只在空白边界常规换行。 */
+function wrapSyllableRows(syllables, width) {
+  const safeWidth = Math.max(1, Math.floor(Number(width) || 1));
+  const words = [];
+  let word = [];
+  let separator = null;
+  const pushWord = () => {
+    if (!word.length) return;
+    words.push({ syllables: word, separator });
+    word = [];
+    separator = null;
+  };
+
+  for (const syllable of Array.isArray(syllables) ? syllables : []) {
+    const fragments = String(syllable?.text || '').match(/\s+|[^\s]+/gu) || [];
+    for (const text of fragments) {
+      const fragment = { ...syllable, text };
+      if (/^\s+$/u.test(text)) {
+        pushWord();
+        separator = { ...fragment, text: ' ' };
+      } else {
+        word.push(fragment);
+      }
+    }
+  }
+  pushWord();
+
+  const rows = [];
+  let row = [];
+  let rowWidth = 0;
+  const pushRow = () => {
+    if (!row.length) return;
+    rows.push({ text: row.map((item) => item.text).join(''), syllables: row });
+    row = [];
+    rowWidth = 0;
+  };
+  const appendOversizedWord = (fragments) => {
+    for (const fragment of fragments) {
+      for (const character of fragment.text) {
+        const characterWidth = stringWidth(character);
+        if (row.length && rowWidth + characterWidth > safeWidth) pushRow();
+        row.push({ ...fragment, text: character });
+        rowWidth += characterWidth;
+      }
+    }
+  };
+
+  for (const item of words) {
+    const wordWidth = stringWidth(item.syllables.map((part) => part.text).join(''));
+    const separatorWidth = row.length && item.separator ? 1 : 0;
+    if (row.length && rowWidth + separatorWidth + wordWidth > safeWidth) pushRow();
+    if (row.length && item.separator) {
+      row.push(item.separator);
+      rowWidth += 1;
+    }
+    if (wordWidth <= safeWidth) {
+      row.push(...item.syllables);
+      rowWidth += wordWidth;
+    } else {
+      appendOversizedWord(item.syllables);
+    }
+  }
+  pushRow();
+  return rows.length ? rows : [{ text: '', syllables: [] }];
+}
+
 export function playbackShortcutRows(options = {}, width = 80) {
   const safeWidth = Math.max(1, Math.floor(Number(width) || 1));
   const segments = playbackShortcutText(options).split(/\s{2,}/).filter(Boolean);
@@ -542,6 +612,28 @@ export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation, w
   const viewport = lyricViewport(addLyricInterludes(lines), elapsedMs, capacity);
   const visible = currentOnly ? viewport.filter((line) => line.current) : viewport;
   const rowsFor = (line, includeTranslation = true) => {
+    const syllableRows = !Number.isFinite(width) || !Array.isArray(line.syllables) || !line.syllables.length
+      ? null
+      : wrapSyllableRows(line.syllables, width);
+    if (syllableRows) {
+      const rows = syllableRows.map((part, index) => ({
+        ...part,
+        played: line.played,
+        current: line.current,
+        translation: false,
+        continuation: index > 0
+      }));
+      if (includeTranslation && showTranslation && line.translation) {
+        rows.push(...wrapTerminalText(line.translation, width).map((text, index) => ({
+          text,
+          played: line.played,
+          current: line.current,
+          translation: true,
+          continuation: index > 0
+        })));
+      }
+      return rows;
+    }
     const wrap = (text, translation) => (Number.isFinite(width) ? wrapTerminalText(text, width) : [text])
       .map((part, index) => ({
         text: part,
@@ -1110,7 +1202,7 @@ function renderDynamic({
       ? displayRows.map((line) => {
           const tone = lyricTone(line);
           const text = line.syllables?.length
-            ? renderSyllableText(line, lyricElapsedMs, tone, columns)
+            ? renderSyllableText(line, lyricElapsedMs, tone, Infinity)
             : truncateText(line.text, columns);
           const rendered = line.syllables?.length && tone === 'current'
             ? text
@@ -1926,6 +2018,9 @@ export async function playWithProgress({
 
   const spawnAt = async (positionMs) => {
     if (persistentController) {
+      if (!persistentController.available && typeof persistentController.initialize === 'function') {
+        await persistentController.initialize();
+      }
       await persistentController.load(activeUrl, { positionMs, volume, durationMs: activeDurationMs, metadata: activeSong });
       await persistentController.resume();
       persistentLoaded = true;
@@ -2045,7 +2140,7 @@ export async function playWithProgress({
     const renderStartedAt = performance.now();
     if (refreshTimer) clearTimeout(refreshTimer);
     const rawElapsedMs = clock.position();
-    const elapsedMs = sessionEnded ? activeDurationMs : displayPosition(rawElapsedMs, activeOffsetMs);
+    const elapsedMs = sessionEnded && !playerError ? activeDurationMs : displayPosition(rawElapsedMs, activeOffsetMs);
     const displayDurationMs = activeDurationMs;
     const lyricElapsedMs = elapsedMs;
     const now = performance.now();
@@ -2272,9 +2367,21 @@ export async function playWithProgress({
   };
 
   let operationQueue = Promise.resolve();
+  const markPlayerFailed = (error) => {
+    if (finished || closing) return;
+    persistentLoaded = false;
+    sessionEnded = true;
+    if (!clock.paused) clock.pause();
+    playerError = error?.message || String(error || '播放器异常');
+    updateSmtc('stopped');
+    setIndicator(`播放器异常：${playerError}，按空格重启`);
+    render();
+  };
   const enqueue = (operation) => {
     operationQueue = operationQueue.then(() => finished ? undefined : operation()).then(render).catch((error) => {
-      if (!finished) {
+      if (!finished && isRecoverablePlayerError(error, persistentController)) {
+        markPlayerFailed(error);
+      } else if (!finished) {
         finished = true;
         rejectCompletion(error);
       }
@@ -3004,12 +3111,14 @@ export async function playWithProgress({
       if (sessionEnded && (action.action === 'play' || action.type === 'toggle_pause')) {
         enqueue(async () => {
           if (closing) return;
+          const restartPosition = playerError ? clock.position() : 0;
           userPaused = false;
+          clock.seekTo(restartPosition);
+          await spawnAt(restartPosition);
           playerError = '';
-          clock.seekTo(0);
-          await spawnAt(0);
+          sessionEnded = false;
           clock.resume();
-          setIndicator('重新播放');
+          setIndicator(restartPosition > 0 ? '播放器已重启' : '重新播放');
         });
         return;
       }
@@ -3159,9 +3268,7 @@ export async function playWithProgress({
           setIndicator(`播放器跳转到 ${formatTime(displayPosition(remotePosition, activeOffsetMs))}`);
           render();
         },
-        onError: (error) => {
-          if (!finished && !closing) rejectCompletion(error);
-        }
+        onError: markPlayerFailed
       };
       controller = player.command === 'mpv'
         ? createMpvController({ command: player.executable, ...callbacks })
@@ -3218,8 +3325,13 @@ export async function playWithProgress({
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     else {
-      await spawnAt(clock.position());
-      clock.resume();
+      try {
+        await spawnAt(clock.position());
+        clock.resume();
+      } catch (error) {
+        if (!isRecoverablePlayerError(error, persistentController)) throw error;
+        markPlayerFailed(error);
+      }
       showCreditsFontRecommendation();
       smtcTimer = setInterval(() => {
         if (!finished) {

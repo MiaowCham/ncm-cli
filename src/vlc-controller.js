@@ -170,10 +170,16 @@ export function createVlcController({
       let startupFailure = null;
       child.once('error', (error) => { if (!initialized) startupFailure = error; else reportError(error); });
       child.once('exit', (code, signal) => {
+        child = null;
         if (closing) return;
         const error = new Error(`VLC 意外退出（code=${code}, signal=${signal || 'none'}）`);
         if (!initialized) startupFailure = error;
-        else reportError(error);
+        else {
+          initialized = false;
+          socket?.destroy?.();
+          socket = null;
+          reportError(error);
+        }
       });
       const deadline = Date.now() + connectTimeoutMs;
       let lastError;

@@ -157,6 +157,7 @@ export function createMpvController({
     if (child) throw new Error('mpv 控制器正在初始化');
     closing = false;
     initializationFailure = null;
+    buffer = '';
     try {
       child = spawnProcess(command, [
         '--no-video',
@@ -171,9 +172,13 @@ export function createMpvController({
         else reportError(error);
       });
       child.once('exit', (code, signal) => {
+        child = null;
         if (!initialized && !closing) {
           initializationFailure = new Error(`mpv 在 IPC 初始化前退出（code=${code}, signal=${signal || 'none'}）`);
         } else if (!closing) {
+          initialized = false;
+          socket?.destroy?.();
+          socket = null;
           reportError(new Error(`mpv 意外退出（code=${code}, signal=${signal || 'none'}）`));
         }
       });

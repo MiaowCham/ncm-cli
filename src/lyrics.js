@@ -6,10 +6,16 @@ const SYLLABLE_TOKEN = /(.*?)\((\d+),(\d+)(?:,\d+)?\)/g;
 function tagTimeMs(tag, offset) {
   const major = Number(tag[1]);
   const minor = Number(tag[2]);
-  const seconds = tag[3] == null ? minor : Number(tag[3]);
-  const fraction = tag[3] == null ? (tag[4] || '') : (tag[4] || '');
-  const fractionMs = fraction ? Number(fraction.padEnd(3, '0')) : 0;
-  const total = tag[3] == null ? major * 60 + minor : major * 3600 + minor * 60 + seconds;
+  const third = tag[3];
+  const fraction = tag[4] || '';
+  // 网易 LRC 会用 [mm:ss:cc] 表示厘秒；只有带小数点的三段时间才视为小时格式。
+  const colonFraction = third != null && !fraction;
+  const fractionMs = colonFraction
+    ? Number(third.padEnd(3, '0'))
+    : fraction ? Number(fraction.padEnd(3, '0')) : 0;
+  const total = third == null || colonFraction
+    ? major * 60 + minor
+    : major * 3600 + minor * 60 + Number(third);
   return Math.max(0, total * 1000 + fractionMs + offset);
 }
 
@@ -102,13 +108,17 @@ export function parseYrc(source = '') {
 
 export function parseLqe(source = '') {
   const text = String(source);
-  const section = (name, next) => {
-    const match = text.match(new RegExp(`\\[${name}[^\\]]*\\]([\\s\\S]*?)(?=\\n\\[${next}|$)`, 'i'));
-    return match?.[1]?.trim() || '';
-  };
-  const original = section('lyrics:', 'translation:');
-  const translated = section('translation:', 'romanization:');
-  const romanized = section('romanization:', '');
+  const headers = [...text.matchAll(/^\[(lyrics|translation|pronunciation|romanization)\s*:[^\]]*\]\s*$/gim)];
+  const sections = new Map();
+  for (let index = 0; index < headers.length; index += 1) {
+    const header = headers[index];
+    const start = header.index + header[0].length;
+    const end = headers[index + 1]?.index ?? text.length;
+    sections.set(header[1].toLowerCase(), text.slice(start, end).trim());
+  }
+  const original = sections.get('lyrics') || '';
+  const translated = sections.get('translation') || '';
+  const romanized = sections.get('pronunciation') || sections.get('romanization') || '';
   return { original, translated, romanized };
 }
 
