@@ -67,7 +67,11 @@ export function parseYrc(source = '') {
   return parseSyllableLines(String(source).replace(/^\{.*\}\s*$/gm, ''));
 }
 
-export function chooseLyricSource({ lys = '', qrc = '', yrc = '', original = '' } = {}) {
+export function chooseLyricSource(input = {}) {
+  const lys = typeof input?.lys === 'string' ? input.lys : '';
+  const qrc = typeof input?.qrc === 'string' ? input.qrc : '';
+  const yrc = typeof input?.yrc === 'string' ? input.yrc : '';
+  const original = typeof input?.original === 'string' ? input.original : '';
   if (lys.trim()) return { source: lys, type: 'lys', lines: parseLyricifySyllable(lys) };
   if (qrc.trim()) return { source: qrc, type: 'qrc', lines: parseQrc(qrc) };
   if (yrc.trim()) return { source: yrc, type: 'yrc', lines: parseYrc(yrc) };

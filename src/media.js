@@ -1634,7 +1634,11 @@ export async function playWithProgress({
   const parseSelected = lyricType === 'lys' ? parseLyricifySyllable
     : lyricType === 'qrc' ? parseQrc
       : lyricType === 'yrc' ? parseYrc : parseLrc;
-  let lyrics = attachLyricTranslations(parseSelected(lyricSource), parseLrc(translatedLyricSource), parseLrc(romanizedLyricSource));
+  let lyrics = attachLyricTranslations(
+    parseSelected(String(lyricSource ?? '')),
+    parseLrc(String(translatedLyricSource ?? '')),
+    parseLrc(String(romanizedLyricSource ?? ''))
+  );
   let clock = createPlaybackClock(activeDurationMs);
   // 创建 bridge、下载封面等准备工作不应计入真实播放位置。
   clock.pause();
@@ -2493,8 +2497,8 @@ export async function playWithProgress({
         : next.lyricType === 'yrc' ? parseYrc : parseLrc;
     lyrics = Array.isArray(next.lyrics) ? next.lyrics : attachLyricTranslations(
       nextParser(next.lyricSource ?? next.lyrics?.original ?? ''),
-      parseLrc(next.translatedLyricSource ?? next.lyrics?.translated ?? ''),
-      parseLrc(next.romanizedLyricSource ?? next.lyrics?.romanized ?? '')
+      parseLrc(String(next.translatedLyricSource ?? next.lyrics?.translated ?? '')),
+      parseLrc(String(next.romanizedLyricSource ?? next.lyrics?.romanized ?? ''))
     );
     hasTranslation = lyrics.some((line) => Boolean(line.translation));
     const hasRomanized = lyrics.some((line) => Boolean(line.romanized));

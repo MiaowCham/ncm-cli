@@ -761,6 +761,10 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
   }
   const lyrics = cachedLyrics || await api.lyrics(song.id, { signal });
   const selectedLyrics = chooseLyricSource(lyrics);
+  void logger.info('lyrics_source_selected', {
+    songId: song.id, type: selectedLyrics.type,
+    lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || '')
+  });
   if (!playbackUrl) try {
     playbackUrl = await cacheSongMusic(song.id, result.url, {
       signal, maxBytes: context.settings.cacheMaxBytes, logger
@@ -1091,6 +1095,10 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
         void context.logger.warn('playlist_lyrics_failed', { songId: song.id, error });
       }
       const selectedLyrics = chooseLyricSource(lyrics);
+      void context.logger.info('lyrics_source_selected', {
+        songId: song.id, type: selectedLyrics.type,
+        lineCount: selectedLyrics.lines.length, sourceBytes: Buffer.byteLength(selectedLyrics.source || '')
+      });
       if (!playbackUrl) try {
         playbackUrl = await cacheSongMusic(song.id, result.url, {
           signal: context.signal, maxBytes: context.settings.cacheMaxBytes, logger: context.logger
