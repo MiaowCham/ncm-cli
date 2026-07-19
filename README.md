@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/MiaowCham/ncm-cli/blob/main/LICENSE)
 [![GitHub last commit](https://img.shields.io/github/last-commit/MiaowCham/ncm-cli)](https://github.com/MiaowCham/ncm-cli/commits/main)
 
-一个运行在终端中的网易云音乐播放器。支持歌曲与歌词搜索、歌单浏览、扫码或 Cookie 登录、逐行歌词、封面显示、播放列表，以及 mpv、VLC 和 ffplay 播放后端。
+一个运行在终端中的网易云音乐播放器。支持歌曲与歌词搜索、歌单浏览、扫码或 Cookie 登录、逐行歌词、封面显示、播放列表，以及 mpv、VLC、Windows MediaPlayer 和 ffplay 播放后端。
 
 > [!NOTE]
 > 本项目由 OpenAI Codex 制作  
@@ -30,7 +30,7 @@
 - `vlc`
 - `ffplay`
 
-播放器需要加入 `PATH`。自动选择顺序为 `mpv → VLC → ffplay`。
+外部播放器需要加入 `PATH`。Windows 构建 SMTC helper 后还可直接使用系统 MediaPlayer；自动选择顺序为 `mpv → VLC → MediaPlayer → ffplay`。其他系统仍为 `mpv → VLC → ffplay`。
 
 ```bash
 npm install
@@ -45,7 +45,7 @@ ncm
 ```
 
 > [!NOTE]
-> Windows 下，`npm install` 会尝试使用 .NET 8 SDK 构建 SMTC helper。缺少 SDK 不会影响普通播放；安装 SDK 后可运行 `npm run build:smtc` 补充构建。
+> Windows 下，`npm install` 会尝试使用 Go 1.25 或更高版本构建 SMTC helper。缺少 Go 不会影响 MPV、VLC 或 ffplay 播放；安装 Go 后可运行 `npm run build:smtc` 补充构建。Windows MediaPlayer 后端依赖该 helper。
 
 首次启动会要求填写 API 地址并保存至 `settings.json`。也可通过环境变量临时指定：
 
@@ -107,7 +107,7 @@ id 347230
 | `/cache [MB]` | 查看或设置整体缓存上限 |
 | `/clrcache [covers\|musics\|other]` | 查看或分类清理本地缓存 |
 
-播放器后端支持 `auto`、`mpv`、`vlc`、`ffplay`；图片协议支持 `auto`、`sixel`、`kitty`、`iterm2`、`symbols`、`ansi`、`none`。
+播放器后端支持 `auto`、`mpv`、`vlc`、`media-player`、`ffplay`；`media-player` 仅在 Windows 可用。图片协议支持 `auto`、`sixel`、`kitty`、`iterm2`、`symbols`、`ansi`、`none`。
 
 音质可选值：
 
@@ -224,7 +224,7 @@ ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 - `NCM_CLI_CONFIG_DIR`：自定义配置与数据缓存目录
 - `NCM_CLI_LOG_FILE`：自定义日志路径
 - `NCM_CLI_LOG_LEVEL`：`debug`、`info`、`warn` 或 `error`
-- `NCM_SMTC_SELF_CONTAINED=1`：构建独立运行的 Windows SMTC helper
+- `NCM_SMTC_HELPER`：覆盖 Windows SMTC/MediaPlayer helper 可执行文件路径
 
 普通播放时间偏移默认是 `0 ms`，同时作用于进度条、歌词、Credits EX 彩蛋和 SMTC 时间线。配置字段 `smtcOffsetMs` 的额外偏移只影响 SMTC；该字段继续兼容已有配置，但不再提供斜杠命令。两者范围均为 `-60000` 至 `60000 ms`。
 

@@ -37,7 +37,7 @@ const QUALITY_LABELS = Object.freeze({
 });
 
 const PLAYER_BACKEND_LABELS = Object.freeze({
-  auto: '自动选择', mpv: 'mpv', vlc: 'VLC', ffplay: 'ffplay'
+  auto: '自动选择', mpv: 'mpv', vlc: 'VLC', 'media-player': 'Windows MediaPlayer', ffplay: 'ffplay'
 });
 
 const IMAGE_PROTOCOL_LABELS = Object.freeze({
@@ -69,7 +69,7 @@ ${chalk.bold('命令')}
   /login status                           查看服务端验证的登录状态
   /signout                                退出登录并清除本地 Cookie
   /quality [level]                        查看、选择或直接设置播放音质
-  /player [auto|mpv|vlc|ffplay]           查看、选择或指定播放器后端
+  /player [auto|mpv|vlc|media-player|ffplay] 查看、选择或指定播放器后端
   /image [协议]                           查看、选择或指定终端图片协议
   /offset [毫秒]                          查看或设置播放时间偏移（默认 0）
   /api [url]                              查看或更换 API 地址

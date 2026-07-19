@@ -9,7 +9,7 @@ import supportsTerminalGraphics from 'supports-terminal-graphics';
 import { parseLrc, parseQrc, parseYrc, parseLyricifySyllable } from './lyrics.js';
 import { loadCachedImage, peekCachedImage } from './image-cache.js';
 import { createMpvController } from './mpv-controller.js';
-import { createSmtcBridge } from './smtc.js';
+import { createSmtcBridge, hasSmtcHelper } from './smtc.js';
 import { createVlcController } from './vlc-controller.js';
 import { hasProcessExited } from './process-state.js';
 import { guardPlayerProcess } from './process-guardian.js';
@@ -154,10 +154,13 @@ export function imageProtocolOrder({ preference = 'auto', kitty = false, iterm2 
   return order;
 }
 
-export function findPlayer(commands = ['mpv', 'vlc', 'cvlc', 'ffplay']) {
+export function findPlayer(commands = ['mpv', 'vlc', 'cvlc', 'media-player', 'ffplay'], {
+  platform = process.platform,
+  mediaPlayerAvailable = hasSmtcHelper({ platform })
+} = {}) {
   const candidates = commands.map((command) => ({
     command,
-    executable: resolveCommandExecutable(command),
+    executable: command === 'media-player' ? (platform === 'win32' && mediaPlayerAvailable ? 'media-player' : null) : resolveCommandExecutable(command),
     args: (url, seconds, volume) => playerArguments(command, url, seconds, volume)
   }));
   return candidates.find((item) => item.executable) || null;
@@ -167,15 +170,19 @@ export function playerBackendLabel(command, { persistent = ['mpv', 'vlc', 'cvlc'
   if (!command) return '未找到';
   if (command === 'mpv') return persistent ? 'mpv（JSON IPC）' : 'mpv（兼容模式）';
   if (command === 'vlc' || command === 'cvlc') return persistent ? 'VLC（oldrc）' : 'VLC（兼容模式）';
+  if (command === 'media-player') return 'Windows MediaPlayer（WinRT）';
   if (command === 'ffplay') return 'ffplay（兼容模式）';
   return String(command);
 }
 
-export function playerCommandsForBackend(backend = 'auto') {
+export function playerCommandsForBackend(backend = 'auto', { platform = process.platform } = {}) {
   if (backend === 'mpv') return ['mpv'];
   if (backend === 'vlc') return ['vlc', 'cvlc'];
+  if (backend === 'media-player') return ['media-player'];
   if (backend === 'ffplay') return ['ffplay'];
-  return ['mpv', 'vlc', 'cvlc', 'ffplay'];
+  return platform === 'win32'
+    ? ['mpv', 'vlc', 'cvlc', 'media-player', 'ffplay']
+    : ['mpv', 'vlc', 'cvlc', 'ffplay'];
 }
 
 export function playerArguments(command, url, seconds, volume = 100) {
@@ -1664,7 +1671,7 @@ export async function playWithProgress({
   let releaseScreen = () => {};
   await closeRetainedSmtc();
   let player = findPlayer(playerCommandsForBackend(playerBackend));
-  if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC 后重试。');
+  if (!player) throw new Error('未找到播放器。请安装 ffplay、mpv 或 VLC；Windows 也可使用 MediaPlayer 后端。');
   const tty = Boolean(process.stdout.isTTY && process.stdin.isTTY);
   const dynamicWriter = tty ? createLatestTerminalWriter(process.stdout, {
     onDiagnostic: ({ type, ...diagnostic }) => mediaLog(
@@ -1757,15 +1764,47 @@ export async function playWithProgress({
   let sessionControlsEnabled = true;
   let sessionEnded = false;
   let retainSmtc = false;
-  const smtc = await createSmtcBridge({
+  const createPlaybackBridge = (mode = 'smtc-only') => createSmtcBridge({
     song: activeSong,
     durationMs: activeDurationMs,
     playlistControls: playlistTracks.length > 0,
     canPrevious: playlistCurrentIndex > 0,
     canNext: playlistCurrentIndex >= 0 && playlistCurrentIndex < playlistTracks.length - 1,
     logger,
-    onControl: (action) => dispatchPlaybackAction(action)
+    onControl: (action) => dispatchPlaybackAction(action),
+    mode,
+    onPlayerEvent: (event, generation) => {
+      if (event.event === 'ended') {
+        if (!finished && !closing) enqueue(
+          () => generation === persistentController?.generation ? handleNaturalEnd() : undefined
+        );
+      } else if (event.event === 'error' && !finished && !closing) {
+        rejectCompletion(new Error(`MediaPlayer 播放错误：${event.message || '未知错误'}`));
+      }
+    }
   });
+  let smtc = await createPlaybackBridge(player.command === 'media-player' ? 'media-player' : 'smtc-only');
+  const activateMediaPlayerBridge = async () => {
+    await smtc.close();
+    smtc = await createPlaybackBridge('media-player');
+    if (!smtc.available) return false;
+    persistentController = smtc;
+    backendLabel = playerBackendLabel('media-player', { persistent: true });
+    return true;
+  };
+  if (player.command === 'media-player') {
+    if (smtc.available) {
+      persistentController = smtc;
+      backendLabel = playerBackendLabel(player.command, { persistent: true });
+    } else if (playerBackend === 'auto') {
+      player = findPlayer(['ffplay']);
+      if (!player) throw new Error('Windows MediaPlayer 初始化失败，且未找到 ffplay 回退播放器。');
+      smtc = await createPlaybackBridge();
+      backendLabel = playerBackendLabel(player.command, { persistent: false });
+    } else {
+      throw new Error('Windows MediaPlayer helper 初始化失败。请先运行 npm run build:smtc。');
+    }
+  }
   const intentionalStops = new WeakSet();
   let resolveCompletion;
   let rejectCompletion;
@@ -2998,8 +3037,15 @@ export async function playWithProgress({
         await controller.close();
         void logger?.warn('persistent_player_unavailable', { player: player.command, error });
         if (player.command !== 'mpv' || playerBackend !== 'auto') break;
-        player = findPlayer(['vlc', 'cvlc', 'ffplay']);
+        player = findPlayer(['vlc', 'cvlc', 'media-player', 'ffplay']);
         if (!player) throw new Error('mpv IPC 初始化失败，且未找到 VLC 或 ffplay 回退播放器。', { cause: error });
+        if (player.command === 'media-player') {
+          if (await activateMediaPlayerBridge()) break;
+          player = findPlayer(['ffplay']);
+          if (!player) throw new Error('mpv 与 Windows MediaPlayer 初始化失败，且未找到 ffplay。', { cause: error });
+          await smtc.close();
+          smtc = await createPlaybackBridge();
+        }
       }
     }
     if (!persistentController) backendLabel = playerBackendLabel(player.command, { persistent: false });
@@ -3058,7 +3104,8 @@ export async function playWithProgress({
     dynamicWriter?.close();
     try {
       await stopCurrent();
-      await persistentController?.close();
+      const sharedMediaPlayerBridge = persistentController === smtc;
+      if (!retainSmtc || !sharedMediaPlayerBridge) await persistentController?.close();
       if (!retainSmtc) {
         updateSmtc('stopped');
         await smtc.close();
