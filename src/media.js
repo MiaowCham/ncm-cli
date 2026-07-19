@@ -430,12 +430,21 @@ export function lyricViewport(lines, elapsedMs, capacity) {
     if (lines[index].timeMs > elapsedMs) break;
     currentIndex = index;
   }
+  const hasDurations = lines.some((line) => Number.isFinite(line.endTimeMs));
+  const overlapEnabled = hasDurations && capacity >= 3;
+  const active = overlapEnabled
+    ? lines.map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.timeMs <= elapsedMs
+        && (!Number.isFinite(line.endTimeMs) || elapsedMs < line.endTimeMs))
+      .slice(-3)
+      .map(({ index }) => index)
+    : (currentIndex >= 0 ? [currentIndex] : []);
   // 播放页只显示当前歌词和之后的歌词，不再保留历史行。
-  const start = Math.max(0, currentIndex);
+  const start = active.length ? Math.min(...active) : Math.max(0, currentIndex);
   return lines.slice(start, start + capacity).map((line, offset) => ({
     ...line,
     played: start + offset <= currentIndex,
-    current: start + offset === currentIndex
+    current: active.includes(start + offset)
   }));
 }
 
