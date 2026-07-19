@@ -330,9 +330,10 @@ export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOff
   if (paused) return 1000;
   const toNextSecond = 1000 - (Math.floor(elapsedMs) % 1000 || 0);
   const lyricElapsedMs = lyricPosition(elapsedMs, lyricOffsetMs);
-  const nextLyric = lyricLines.find((line) => line.timeMs > lyricElapsedMs);
+  const scheduledLines = addLyricInterludes(lyricLines);
+  const nextLyric = scheduledLines.find((line) => line.timeMs > lyricElapsedMs);
   const toNextLyric = nextLyric ? nextLyric.timeMs - lyricElapsedMs : Infinity;
-  const syllableBoundaries = lyricLines
+  const syllableBoundaries = scheduledLines
     .flatMap((line) => Array.isArray(line.syllables)
       ? line.syllables.flatMap((syllable) => [syllable.startTime, syllable.endTime])
       : [])
@@ -461,6 +462,29 @@ export function lyricViewport(lines, elapsedMs, capacity) {
   );
 }
 
+function addLyricInterludes(lines) {
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    output.push(line);
+    const next = lines[index + 1];
+    if (!next || !Number.isFinite(line.endTimeMs) || next.timeMs - line.endTimeMs <= 8000) continue;
+    const start = line.endTimeMs + 2000;
+    const end = next.timeMs - 1000;
+    if (end <= start) continue;
+    const span = end - start;
+    output.push({
+      timeMs: start, endTimeMs: end, text: '● ● ●', interlude: true,
+      syllables: [0, 1, 2].map((dot) => ({
+        text: dot === 2 ? '●' : '● ',
+        startTime: start + Math.round(span * dot / 3),
+        endTime: end
+      }))
+    });
+  }
+  return output;
+}
+
 export function attachLyricTranslations(originalLines, translatedLines, romanizedLines = []) {
   const translations = new Map();
   for (const line of translatedLines) {
@@ -483,7 +507,7 @@ export function attachLyricTranslations(originalLines, translatedLines, romanize
 
 export function playbackLyricRows(lines, elapsedMs, capacity, showTranslation, width = Infinity, currentOnly = false) {
   if (capacity <= 0) return [];
-  const viewport = lyricViewport(lines, elapsedMs, capacity);
+  const viewport = lyricViewport(addLyricInterludes(lines), elapsedMs, capacity);
   const visible = currentOnly ? viewport.filter((line) => line.current) : viewport;
   const rowsFor = (line, includeTranslation = true) => {
     const wrap = (text, translation) => (Number.isFinite(width) ? wrapTerminalText(text, width) : [text])
