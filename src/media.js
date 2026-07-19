@@ -528,7 +528,7 @@ export function renderSyllableText(line, elapsedMs, tone, width = Infinity) {
     const end = Number(syllable.endTime);
     const value = syllable.text || '';
     if (Number.isFinite(start) && Number.isFinite(end) && elapsedMs >= end) return chalk.white(value);
-    if (Number.isFinite(start) && elapsedMs >= start) return chalk.cyan(value);
+    if (Number.isFinite(start) && elapsedMs >= start) return primaryText(value);
     return secondaryText(value);
   }).join('');
   return width === Infinity ? text : truncateText(text, width);
