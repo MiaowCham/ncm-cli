@@ -2867,7 +2867,7 @@ export async function playWithProgress({
       if (!hasTranslation && !hasRomanized) return;
       if (showRomanized) {
         showRomanized = false;
-        showTranslation = hasTranslation;
+        showTranslation = false;
       } else if (showTranslation && hasRomanized) {
         showTranslation = false;
         showRomanized = true;

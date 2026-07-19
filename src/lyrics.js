@@ -130,6 +130,7 @@ export function currentLyric(lines, elapsedMs) {
 export function plainLyrics(source = '') {
   return source
     .split(/\r?\n/)
+    .filter((line) => !/^\s*\{.*\}\s*$/.test(line))
     .map((line) => line
       .replace(/^(?:\[[^\]]+\])+\s*/, '')
       .replace(/\[[0-9]{1,3}:[0-9]{1,2}(?::[0-9]{1,2})?(?:\.[0-9]{1,3})?\]\s*$/, ''))
