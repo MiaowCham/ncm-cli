@@ -469,8 +469,24 @@ export function lyricViewport(lines, elapsedMs, capacity) {
   );
 }
 
-function addLyricInterludes(lines) {
+function createLyricInterlude(start, end) {
+  const span = end - start;
+  return {
+    timeMs: start, endTimeMs: end, text: '● ● ●', interlude: true,
+    syllables: [0, 1, 2].map((dot) => ({
+      text: dot === 2 ? '●' : '● ',
+      startTime: start + Math.round(span * dot / 3),
+      endTime: end
+    }))
+  };
+}
+
+export function addLyricInterludes(lines) {
   const output = [];
+  const first = lines[0];
+  if (first && first.timeMs > 5000) {
+    output.push(createLyricInterlude(0, first.timeMs - 1000));
+  }
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     output.push(line);
@@ -479,15 +495,7 @@ function addLyricInterludes(lines) {
     const start = line.endTimeMs + 2000;
     const end = next.timeMs - 1000;
     if (end <= start) continue;
-    const span = end - start;
-    output.push({
-      timeMs: start, endTimeMs: end, text: '● ● ●', interlude: true,
-      syllables: [0, 1, 2].map((dot) => ({
-        text: dot === 2 ? '●' : '● ',
-        startTime: start + Math.round(span * dot / 3),
-        endTime: end
-      }))
-    });
+    output.push(createLyricInterlude(start, end));
   }
   return output;
 }
