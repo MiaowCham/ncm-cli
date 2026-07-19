@@ -332,10 +332,19 @@ export function nextRefreshDelay(elapsedMs, lyricLines, paused = false, lyricOff
   const lyricElapsedMs = lyricPosition(elapsedMs, lyricOffsetMs);
   const nextLyric = lyricLines.find((line) => line.timeMs > lyricElapsedMs);
   const toNextLyric = nextLyric ? nextLyric.timeMs - lyricElapsedMs : Infinity;
+  const syllableBoundaries = lyricLines
+    .flatMap((line) => Array.isArray(line.syllables)
+      ? line.syllables.flatMap((syllable) => [syllable.startTime, syllable.endTime])
+      : [])
+    .map(Number)
+    .filter((time) => Number.isFinite(time) && time > lyricElapsedMs);
+  const nextSyllable = syllableBoundaries.length
+    ? Math.min(...syllableBoundaries) - lyricElapsedMs
+    : Infinity;
   const animationDelay = Number.isFinite(Number(animationIntervalMs))
     ? Math.max(16, Number(animationIntervalMs))
     : Infinity;
-  return clamp(Math.min(toNextSecond, toNextLyric, animationDelay), 16, 1000);
+  return clamp(Math.min(toNextSecond, toNextLyric, nextSyllable, animationDelay), 16, 1000);
 }
 
 function truncateText(text, width) {
