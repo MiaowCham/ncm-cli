@@ -280,22 +280,31 @@ export async function inspectDataCache(directory = dataCacheDirectory()) {
   return { ...groups, total: groups.covers + groups.musics + groups.other, files: files.length };
 }
 
+async function removeBestEffort(target) {
+  try { await rm(target, { recursive: true, force: true }); return; } catch (error) {
+    if (!['EBUSY', 'EPERM', 'EACCES'].includes(error.code)) throw error;
+  }
+  let entries = [];
+  try { entries = await readdir(target, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) await removeBestEffort(path.join(target, entry.name));
+}
+
 export async function clearDataCache(group, directory = dataCacheDirectory()) {
   if (!['covers', 'musics', 'other'].includes(group)) {
     throw new Error('缓存分类必须是 covers、musics 或 other');
   }
   if (group !== 'other') {
     const name = group === 'covers' ? 'Covers' : 'Musics';
-    await rm(path.join(directory, name), { recursive: true, force: true });
+    await removeBestEffort(path.join(directory, name));
   } else {
     let entries = [];
     try { entries = await readdir(directory, { withFileTypes: true }); } catch {}
     for (const entry of entries) {
       if (!entry.isDirectory() || ['covers', 'musics'].includes(entry.name.toLowerCase())) continue;
-      await rm(path.join(directory, entry.name), { recursive: true, force: true });
+      await removeBestEffort(path.join(directory, entry.name));
     }
     // 日志与数据缓存同属本地运行产物，归入 other 一并清理。
-    await rm(path.join(path.dirname(configFilePath()), 'logs'), { recursive: true, force: true });
+    await removeBestEffort(path.join(path.dirname(configFilePath()), 'logs'));
   }
   for (const [key, buffer] of memory) {
     if (!key.startsWith(`${path.resolve(directory)}\0`)) continue;
