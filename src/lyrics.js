@@ -46,10 +46,19 @@ function parseSyllableLines(source = '') {
     const lineEnd = lineStart + Number(match[2]);
     const syllables = [];
     let token;
-    SYLLABLE_TOKEN.lastIndex = 0;
-    while ((token = SYLLABLE_TOKEN.exec(match[3]))) {
-      const start = Number(token[2]);
-      syllables.push({ text: token[1], startTime: start, endTime: start + Number(token[3]) });
+    const body = match[3];
+    if (/^\(\d+,\d+\)/.test(body)) {
+      const yrcToken = /\((\d+),(\d+)\)([^()]*)/g;
+      while ((token = yrcToken.exec(body))) {
+        const start = Number(token[1]);
+        syllables.push({ text: token[3], startTime: start, endTime: start + Number(token[2]) });
+      }
+    } else {
+      SYLLABLE_TOKEN.lastIndex = 0;
+      while ((token = SYLLABLE_TOKEN.exec(body))) {
+        const start = Number(token[2]);
+        syllables.push({ text: token[1], startTime: start, endTime: start + Number(token[3]) });
+      }
     }
     const text = syllables.length ? syllables.map((item) => item.text).join('') : match[3];
     if (text) output.push({ timeMs: lineStart, endTimeMs: lineEnd, text, syllables });

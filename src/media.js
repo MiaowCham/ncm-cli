@@ -444,10 +444,12 @@ export function lyricViewport(lines, elapsedMs, capacity) {
     ? Math.min(...active)
     : (overlapEnabled ? Math.max(0, currentIndex + 1) : Math.max(0, currentIndex));
   return lines.slice(start, start + capacity).map((line, offset) => ({
-    ...line,
     played: start + offset <= currentIndex,
-    current: active.includes(start + offset)
-  }));
+    current: active.includes(start + offset),
+    ...line,
+  })).filter((line) =>
+    !overlapEnabled || !Number.isFinite(line.endTimeMs) || elapsedMs < line.endTimeMs
+  );
 }
 
 export function attachLyricTranslations(originalLines, translatedLines, romanizedLines = []) {
