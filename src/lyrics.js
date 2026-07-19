@@ -63,7 +63,7 @@ function parseSyllableLines(source = '') {
     const text = syllables.length ? syllables.map((item) => item.text).join('') : match[3];
     if (text) output.push({ timeMs: lineStart, endTimeMs: lineEnd, text, syllables });
   }
-  return output;
+  return output.sort((a, b) => a.timeMs - b.timeMs);
 }
 
 export function parseQrc(source = '') { return parseSyllableLines(source); }
