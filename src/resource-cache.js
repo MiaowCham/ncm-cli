@@ -58,13 +58,18 @@ export async function loadCachedLyrics(id, loader, options = {}) {
     return null;
   };
   const localFormats = await Promise.all([
-    ['song-lyrics-lys', 'lys'], ['song-lyrics-qrc', 'qrc'], ['song-lyrics-yrc', 'yrc']
+    ['song-lyrics-lqe', 'lqe'], ['song-lyrics-lys', 'lys'], ['song-lyrics-qrc', 'qrc'], ['song-lyrics-yrc', 'yrc']
   ].map(async ([type, field]) => [field, await readLocal(type)]));
   const local = Object.fromEntries(localFormats);
   for (const [field, value] of Object.entries(local)) {
     void options.logger?.info(value ? 'lyrics_advanced_cache_hit' : 'lyrics_advanced_cache_miss', {
       songId: id, format: field, bytes: value ? Buffer.byteLength(value) : 0
     });
+  }
+  if (local.lqe) {
+    const parsed = (await import('./lyrics.js')).parseLqe(local.lqe);
+    const original = await readLocal('song-lyrics');
+    return { original: original || parsed.original, translated: parsed.translated || await readLocal('song-lyrics-translated') || '', romanized: parsed.romanized || await readLocal('song-lyrics-romanized') || '', ...local };
   }
   if (local.lys || local.qrc || local.yrc) {
     const original = await readLocal('song-lyrics');

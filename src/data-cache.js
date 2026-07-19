@@ -25,6 +25,7 @@ const NAMESPACE_TYPES = Object.freeze({
   'song-lyrics': ['Lyrics', 'song', 'lyric.lrc'],
   'song-lyrics-qrc': ['Lyrics', 'song', 'lyric.qrc'],
   'song-lyrics-lys': ['Lyrics', 'song', 'lyric.lys'],
+  'song-lyrics-lqe': ['Lyrics', 'song', 'lyric.lqe'],
   'song-lyrics-yrc': ['Lyrics', 'song', 'lyric.yrc'],
   'song-lyrics-translated': ['Lyrics', 'song', 'trans.lrc'],
   'song-lyrics-romanized': ['Lyrics', 'song', 'roman.lrc'],

@@ -100,11 +100,29 @@ export function parseYrc(source = '') {
   return parseSyllableLines(text.replace(/^\{.*\}\s*$/gm, ''));
 }
 
+export function parseLqe(source = '') {
+  const text = String(source);
+  const section = (name, next) => {
+    const match = text.match(new RegExp(`\\[${name}[^\\]]*\\]([\\s\\S]*?)(?=\\n\\[${next}|$)`, 'i'));
+    return match?.[1]?.trim() || '';
+  };
+  const original = section('lyrics:', 'translation:');
+  const translated = section('translation:', 'romanization:');
+  const romanized = section('romanization:', '');
+  return { original, translated, romanized };
+}
+
 export function chooseLyricSource(input = {}) {
+  const lqe = typeof input?.lqe === 'string' ? input.lqe : '';
   const lys = typeof input?.lys === 'string' ? input.lys : '';
   const qrc = typeof input?.qrc === 'string' ? input.qrc : '';
   const yrc = typeof input?.yrc === 'string' ? input.yrc : '';
   const original = typeof input?.original === 'string' ? input.original : '';
+  if (lqe.trim()) {
+    const parsed = parseLqe(lqe);
+    const lines = parseLyricifySyllable(parsed.original);
+    if (lines.length) return { source: parsed.original, type: 'lys', lines, lqe: parsed };
+  }
   for (const [type, source, parse] of [
     ['lys', lys, parseLyricifySyllable],
     ['qrc', qrc, parseQrc],
