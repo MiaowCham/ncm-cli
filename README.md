@@ -30,7 +30,7 @@
 - `vlc`
 - `ffplay`
 
-外部播放器需要加入 `PATH`。Windows 构建 SMTC helper 后还可直接使用系统 MediaPlayer；自动选择顺序为 `mpv → VLC → MediaPlayer → ffplay`。其他系统仍为 `mpv → VLC → ffplay`。
+外部播放器需要加入 `PATH`。Windows 发行包内置 x64 和 arm64 的 SMTC helper，因此还可直接使用系统 MediaPlayer；自动选择顺序为 `mpv → VLC → MediaPlayer → ffplay`。其他系统仍为 `mpv → VLC → ffplay`。
 
 ```bash
 npm install
@@ -45,7 +45,7 @@ ncm
 ```
 
 > [!NOTE]
-> Windows 下，`npm install` 会尝试使用 Go 1.25 或更高版本构建 SMTC helper。缺少 Go 不会影响 MPV、VLC 或 ffplay 播放；安装 Go 后可运行 `npm run build:smtc` 补充构建。Windows MediaPlayer 后端依赖该 helper。
+> npm 发行包已包含 Windows x64 和 arm64 的预编译 SMTC helper，无需安装 Go。源码中缺少对应预编译文件时，`npm install` 才会尝试使用 Go 1.25 或更高版本构建；维护者可运行 `npm run build:smtc` 重建当前架构，或运行 `npm run build:smtc:all` 交叉构建两个架构。缺少 helper 不会影响 MPV、VLC 或 ffplay 播放，但 Windows MediaPlayer 后端和系统媒体控制依赖该 helper。
 
 首次启动会要求填写 API 地址并保存至 `settings.json`。也可通过环境变量临时指定：
 
@@ -292,6 +292,7 @@ Credits EX 在经过普通播放偏移校准后的前 `46800 ms` 显示包含封
 - [mpv](https://mpv.io/)
 - [VLC](https://www.videolan.org/vlc/)
 - [FFmpeg / ffplay](https://ffmpeg.org/)
+- Windows SMTC/MediaPlayer helper 的 WinRT 接入参考 [go-musicfox/go-musicfox](https://github.com/go-musicfox/go-musicfox)，并使用其维护的 [go-musicfox/winrt-go](https://github.com/go-musicfox/winrt-go) 分支及 [go-ole/go-ole](https://github.com/go-ole/go-ole) 完成 WinRT/COM 调用；NDJSON 协议和播放器状态同步由本项目实现。完整第三方许可见 [`native/smtc-bridge/NOTICE.md`](native/smtc-bridge/NOTICE.md)。
 - 歌词 QRC、YRC、Lyricify Syllable 解析思路参考 [WXRIW/Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper)
 - Credits EX 彩蛋移植自 MIT 项目 [frums-credits-cli-nosound](https://github.com/sititou70/frums-credits-cli-nosound)：保留原始 CSF 分镜与文本素材并实现兼容播放器，不包含其静音占位音频；详细归属见 [`assets/credits-csf/NOTICE.md`](assets/credits-csf/NOTICE.md)。
 - `NCM Credits VGA16` 字体改编自 Dimitar Toshkov Zhekov 创作的 Terminus Font，并通过 Ubuntu/Debian `console-setup` 分发；详细归属见 [`assets/fonts/NOTICE.md`](assets/fonts/NOTICE.md)。
@@ -302,3 +303,4 @@ Credits EX 在经过普通播放偏移校准后的前 `46800 ms` 显示包含封
 
 - `assets/credits-csf/` 中移植的上游彩蛋素材适用该目录内 `NOTICE.md` 记录的 MIT 条款。
 - `assets/fonts/NCM-Credits-VGA16-Bold.ttf` 适用 [SIL Open Font License 1.1](assets/fonts/OFL.txt)，不适用仓库根目录的 MIT License。
+- `native/smtc-bridge/publish/` 中的预编译 helper 包含 MIT 和 BSD 许可的第三方 Go 依赖，完整条款见 [`native/smtc-bridge/NOTICE.md`](native/smtc-bridge/NOTICE.md)。

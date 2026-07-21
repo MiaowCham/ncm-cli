@@ -6,9 +6,19 @@
   "bin": {
     "ncm": "./bin/ncm.js"
   },
+  "files": [
+    "assets/",
+    "bin/",
+    "native/smtc-bridge/",
+    "scripts/",
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "postinstall": "node ./scripts/build-smtc.js",
-    "build:smtc": "node ./scripts/build-smtc.js --required",
+    "build:smtc": "node ./scripts/build-smtc.js --required --force",
+    "build:smtc:all": "node ./scripts/build-smtc.js --required --force --all",
     "start": "node ./bin/ncm.js",
     "test": "node --test",
     "test:live": "node ./scripts/live-api.js"

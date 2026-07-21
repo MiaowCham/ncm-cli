@@ -22,6 +22,10 @@ The repository build writes the architecture-specific binary to
 npm run build:smtc
 ```
 
+Release packages include both precompiled architectures. Use
+`npm run build:smtc:all` to rebuild both files before packaging. Third-party
+licenses for the statically linked dependencies are recorded in `NOTICE.md`.
+
 The protocol retains v1 session validation and the existing `metadata`,
 `controls`, `playback`, and `shutdown` commands. MediaPlayer mode additionally
 accepts `load`, `play`, `pause`, `seek`, `volume`, and `stop`. Player commands
