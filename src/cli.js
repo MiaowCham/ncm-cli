@@ -815,6 +815,7 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     favorited,
     lyricOffsetMs: Number.isFinite(userState.lyricOffsetMs) ? userState.lyricOffsetMs : context.settings.lyricOffsetMs,
     translationMode: context.settings.translationMode,
+    pureMode: context.settings.pureMode,
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
@@ -841,6 +842,10 @@ async function playSong(api, song, context, rl, cachedLyrics = null, returnPageR
     onTranslationModeChange: async (translationMode) => {
       context.settings.translationMode = translationMode;
       await saveSettings({ ...context.settings, translationMode });
+    },
+    onPureModeChange: async (pureMode) => {
+      context.settings.pureMode = pureMode;
+      await saveSettings({ ...context.settings, pureMode });
     },
     registerLyricsRefresh: (handler) => { applyLyricsRefresh = handler; },
     returnPageRows,
@@ -1277,6 +1282,7 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     ...initial,
     lyricOffsetMs: initial.lyricOffsetMs,
     translationMode: context.settings.translationMode,
+    pureMode: context.settings.pureMode,
     smtcOffsetMs: context.settings.smtcOffsetMs,
     playerBackend: context.settings.playerBackend,
     imageProtocol: context.settings.imageProtocol,
@@ -1305,6 +1311,10 @@ async function playPlaylist(api, playlist, tracks, startIndex, context) {
     onTranslationModeChange: async (translationMode) => {
       context.settings.translationMode = translationMode;
       await saveSettings({ ...context.settings, translationMode });
+    },
+    onPureModeChange: async (pureMode) => {
+      context.settings.pureMode = pureMode;
+      await saveSettings({ ...context.settings, pureMode });
     },
     registerLyricsRefresh: (handler) => { applyLyricsRefresh = handler; },
     returnPageRows: context.returnPageRows,

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { addLyricInterludes, adjustPlaybackOffset, ansiImageLimits, attachLyricTranslations, compactPlaybackRequiredRow, createLatestDebounce, createLatestTerminalWriter, createPlaybackClock, displayPosition, findPlayer, imageProtocolOrder, isTermuxEnvironment, LOOP_MODES, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, planCoverSize, planPlaybackVerticalLayout, playbackAction, playbackCoverRowBudget, playbackDynamicRows, playbackEntrySequence, playbackImportPromptSequence, playbackLyricRows, playbackMetadataRows, playbackMouseTrackingSequence, playbackPlaylistModeRows, playbackPlaylistModeText, playbackPlaylistOverlayRows, playbackPrioritizedRows, playbackProgressSegments, playbackProgressText, playbackRowsWithTopSpacer, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playerBackendLabel, playerCommandsForBackend, playlistViewport, prepareSixelRender, RANDOM_MODES, rawPosition, resolveCommandExecutable, runPlaybackExitSequence, shouldSyncPlayerPosition, shuffledPlaylistOrder, sixelCursorBox, smtcTimeline, startTrackWithPreparedHeader, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
+import { addLyricInterludes, adjustPlaybackOffset, ansiImageLimits, attachLyricTranslations, compactPlaybackRequiredRow, createLatestDebounce, createLatestTerminalWriter, createPlaybackClock, displayPosition, findPlayer, imageProtocolOrder, isTermuxEnvironment, LOOP_MODES, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, planCoverSize, planPlaybackVerticalLayout, playbackAction, playbackChromeRows, playbackCoverRowBudget, playbackCreditsConfig, playbackDynamicRows, playbackEntrySequence, playbackImportPromptSequence, playbackLyricRows, playbackMetadataRows, playbackMouseTrackingSequence, playbackPlaylistModeRows, playbackPlaylistModeText, playbackPlaylistOverlayRows, playbackPrioritizedRows, playbackProgressSegments, playbackProgressText, playbackPureOverlayLayout, playbackRowsWithTopSpacer, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playerBackendLabel, playerCommandsForBackend, playlistViewport, prepareSixelRender, RANDOM_MODES, rawPosition, resolveCommandExecutable, runPlaybackExitSequence, shouldSyncPlayerPosition, shuffledPlaylistOrder, sixelCursorBox, smtcTimeline, startTrackWithPreparedHeader, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
 import stringWidth from 'string-width';
 import { createTrackOffsetSession } from '../src/media.js';
 
@@ -127,7 +127,11 @@ test('歌曲信息只剩一行时合并显示歌曲名和歌手', () => {
   assert.match(titleFirst, /^完整歌名 - /);
   assert.ok(stringWidth(titleFirst) <= 18);
   assert.deepEqual(playbackMetadataRows(song, 'mpv', 80, 0), []);
-  assert.equal(playbackMetadataRows(song, 'mpv', 80, 2).length, 2);
+  const pureMetadata = playbackMetadataRows(song, 'mpv', 80, 2);
+  assert.equal(pureMetadata.length, 2);
+  assert.match(pureMetadata[0], /歌曲名/);
+  assert.match(pureMetadata[1], /^歌手：歌手甲\/歌手乙$/);
+  assert.doesNotMatch(pureMetadata.join('\n'), /专辑|播放器|ID/);
 });
 
 test('动态播放器优先保留当前歌词和进度条并保持状态在进度条上方', () => {
@@ -232,6 +236,85 @@ test('SIXEL 输出固定恢复并下移到约定图片高度', () => {
     sixelCursorBox(sixel, 8),
     Buffer.concat([Buffer.from('\x1b7'), sixel, Buffer.from('\x1b8\x1b[8E')])
   );
+});
+
+test('纯净模式只保留两行歌曲信息并隐藏快捷键区域', () => {
+  assert.deepEqual(playbackChromeRows({
+    pureMode: true, metadataRows: 5, modeRows: 1, shortcutRows: 3
+  }), {
+    metadataRows: 2, metadataSpacerRows: 0, modeRows: 1, shortcutRows: 0
+  });
+  assert.deepEqual(playbackChromeRows({
+    metadataRows: 5, modeRows: 2, shortcutRows: 3
+  }), {
+    metadataRows: 5, metadataSpacerRows: 1, modeRows: 2, shortcutRows: 3
+  });
+});
+
+test('纯净模式为 Credits 单行歌词保留歌手后的空行', () => {
+  const chrome = playbackChromeRows({
+    pureMode: true,
+    preserveLyricSpacer: playbackCreditsConfig({ id: 405372425 }, true)?.currentLyricOnly,
+    metadataRows: 5,
+    shortcutRows: 2
+  });
+  assert.deepEqual(chrome, {
+    metadataRows: 2, metadataSpacerRows: 1, modeRows: 0, shortcutRows: 0
+  });
+  const layout = planPlaybackVerticalLayout({
+    rows: 10,
+    ...chrome,
+    futureLyricRows: 10,
+    statusRows: 1,
+    currentLyricRows: 1,
+    progressRows: 1
+  });
+  const dynamicRows = playbackPrioritizedRows({
+    progress: '进度',
+    indicatorRow: '状态',
+    requiredContentRows: ['当前歌词'],
+    optionalPrefixRows: [''],
+    availableRows: 8,
+    columns: 80,
+    layout
+  });
+  assert.deepEqual(dynamicRows.slice(0, 2), ['', '当前歌词']);
+
+  const compact = planPlaybackVerticalLayout({
+    rows: 3,
+    ...chrome,
+    futureLyricRows: 3,
+    statusRows: 1,
+    currentLyricRows: 1,
+    progressRows: 1
+  });
+  assert.equal(compact.metadataRows, 0);
+  assert.equal(compact.metadataSpacerRows, 0);
+});
+
+test('纯净模式不禁用 Credits 彩蛋', () => {
+  const timedCredits = playbackCreditsConfig({ id: 405372425 }, true);
+  const directCredits = playbackCreditsConfig({ id: 2053695037 }, true);
+  assert.equal(timedCredits?.mode, 'credits-csf');
+  assert.equal(timedCredits?.currentLyricOnly, true);
+  assert.equal(directCredits?.mode, 'credits-csf');
+  assert.equal(directCredits?.directAnimation, true);
+});
+
+test('纯净模式展开歌单时仍在底部保留状态、进度和随机循环', () => {
+  const layout = playbackPureOverlayLayout(10, 1);
+  assert.equal(layout.futureLyricRows, 7);
+  const rows = playbackPrioritizedRows({
+    progress: '进度',
+    modeRows: ['随机/循环'],
+    indicatorRow: '状态',
+    optionalSuffixRows: Array.from({ length: 7 }, (_, index) => `曲目${index + 1}`),
+    availableRows: 10,
+    columns: 80,
+    layout
+  });
+  assert.deepEqual(rows.slice(-3), ['状态', '进度', '随机/循环']);
+  assert.equal(rows.length, 10);
 });
 
 test('SIXEL 成功结果携带确定行数且不会被误判为协议失败', () => {
@@ -453,6 +536,8 @@ test('播放快捷键解析退出、刷新、暂停、跳转、音量、翻译�
   assert.deepEqual(playbackAction('q'), { type: 'quit' });
   assert.deepEqual(playbackAction('r'), { type: 'refresh' });
   assert.deepEqual(playbackAction('i'), { type: 'import_lyrics' });
+  assert.deepEqual(playbackAction('m'), { type: 'toggle_pure_mode' });
+  assert.deepEqual(playbackAction('M'), { type: 'toggle_pure_mode' });
   assert.deepEqual(playbackAction('R'), { type: 'refresh' });
   assert.deepEqual(playbackAction(' '), { type: 'toggle_pause' });
   assert.deepEqual(playbackAction('\u001b[D'), { type: 'seek', deltaMs: -5000 });
@@ -534,6 +619,7 @@ test('常驻快捷提示不混入歌单操作', () => {
   assert.equal(playbackShortcutText().includes('歌单'), false);
   assert.equal(playbackShortcutText({ hasPlaylist: true }).includes('歌单'), false);
   assert.match(playbackShortcutText(), /Ctrl\+↑\/↓ 偏移/);
+  assert.match(playbackShortcutText(), /m 纯净模式/);
   assert.match(playbackShortcutText(), /r 刷新/);
   assert.equal(playbackShortcutText().includes('收藏'), false);
   assert.match(playbackShortcutText({ canFavorite: true }), /f 收藏/);
@@ -548,6 +634,12 @@ test('随机循环指示器包含按键和歌单播放操作', () => {
   const open = playbackPlaylistModeText({ randomLabel: '不随机', loopLabel: '顺序播放', playlistOpen: true });
   assert.match(open, /Enter 播放/);
   assert.match(open, /p\/Esc 关闭/);
+  const pure = playbackPlaylistModeText({
+    randomLabel: '打乱列表', loopLabel: '单曲循环', pureMode: true
+  });
+  assert.equal(pure, '[随机：打乱列表]  [循环：单曲循环]');
+  assert.doesNotMatch(pure, /\[(?:s|l|p) /);
+  assert.doesNotMatch(pure, /选择|切歌|播放/);
 });
 
 test('歌单控制指示器按完整控制项自动换行', () => {

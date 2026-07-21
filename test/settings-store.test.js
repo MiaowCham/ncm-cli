@@ -7,7 +7,7 @@ import { loadCookie, saveCookie } from '../src/cookie-store.js';
 import {
   loadSettings, saveSettings, settingsFilePath, DEFAULT_LYRIC_OFFSET_MS, DEFAULT_SMTC_OFFSET_MS,
   DEFAULT_IMAGE_CACHE_MAX_BYTES, DEFAULT_IMAGE_PROTOCOL, DEFAULT_PLAYER_BACKEND, DEFAULT_SEARCH_LIMIT,
-  DEFAULT_TRANSLATION_MODE
+  DEFAULT_TRANSLATION_MODE, DEFAULT_PURE_MODE
 } from '../src/settings-store.js';
 
 test('音质设置使用独立文件并可持久化', async () => {
@@ -19,12 +19,13 @@ test('音质设置使用独立文件并可持久化', async () => {
     await saveSettings({
       quality: 'lossless', playerBackend: 'vlc', imageProtocol: 'sixel', cacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES,
       lyricOffsetMs: 1500, smtcOffsetMs: 250, searchLimit: 40, translationMode: 'romanized',
+      pureMode: true,
       apiBaseUrl: 'https://api.example.com/v1/'
     }, file);
     assert.deepEqual(await loadSettings(file), {
       quality: 'lossless', playerBackend: 'vlc', imageProtocol: 'sixel',
       cacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES, lyricOffsetMs: 1500, smtcOffsetMs: 250, searchLimit: 40,
-      translationMode: 'romanized',
+      translationMode: 'romanized', pureMode: true,
       apiBaseUrl: 'https://api.example.com/v1'
     });
     assert.equal(JSON.parse(await readFile(file, 'utf8')).quality, 'lossless');
@@ -43,14 +44,14 @@ test('缺失或非法设置回退默认值，保存时拒绝非法值', async ()
       quality: 'standard', playerBackend: DEFAULT_PLAYER_BACKEND, imageProtocol: DEFAULT_IMAGE_PROTOCOL,
       cacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES, lyricOffsetMs: DEFAULT_LYRIC_OFFSET_MS,
       smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS, searchLimit: DEFAULT_SEARCH_LIMIT,
-      translationMode: DEFAULT_TRANSLATION_MODE, apiBaseUrl: null
+      translationMode: DEFAULT_TRANSLATION_MODE, pureMode: DEFAULT_PURE_MODE, apiBaseUrl: null
     });
-    await writeFile(file, '{"quality":"unsupported"}');
+    await writeFile(file, '{"quality":"unsupported","pureMode":"true"}');
     assert.deepEqual(await loadSettings(file), {
       quality: 'standard', playerBackend: DEFAULT_PLAYER_BACKEND, imageProtocol: DEFAULT_IMAGE_PROTOCOL,
       cacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES, lyricOffsetMs: DEFAULT_LYRIC_OFFSET_MS,
       smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS, searchLimit: DEFAULT_SEARCH_LIMIT,
-      translationMode: DEFAULT_TRANSLATION_MODE, apiBaseUrl: null
+      translationMode: DEFAULT_TRANSLATION_MODE, pureMode: DEFAULT_PURE_MODE, apiBaseUrl: null
     });
     await writeFile(file, '{"quality":"standard","searchLimit":0}');
     assert.equal((await loadSettings(file)).searchLimit, DEFAULT_SEARCH_LIMIT);
@@ -64,6 +65,7 @@ test('缺失或非法设置回退默认值，保存时拒绝非法值', async ()
     await assert.rejects(saveSettings({ searchLimit: 1.5 }, file), /搜索返回数量/);
     await assert.rejects(saveSettings({ searchLimit: 101 }, file), /搜索返回数量/);
     await assert.rejects(saveSettings({ translationMode: 'unsupported' }, file), /歌词翻译模式/);
+    await assert.rejects(saveSettings({ pureMode: 'true' }, file), /纯净模式/);
     await assert.rejects(saveSettings({ apiBaseUrl: 'https://user:pass@example.com' }, file), /用户名或密码/);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -79,14 +81,16 @@ test('旧配置迁移默认偏移，部分保存不会覆盖另一项设置', as
       quality: 'lossless', playerBackend: DEFAULT_PLAYER_BACKEND, imageProtocol: DEFAULT_IMAGE_PROTOCOL,
       cacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES, lyricOffsetMs: DEFAULT_LYRIC_OFFSET_MS,
       smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS, searchLimit: DEFAULT_SEARCH_LIMIT,
-      translationMode: DEFAULT_TRANSLATION_MODE, apiBaseUrl: null
+      translationMode: DEFAULT_TRANSLATION_MODE, pureMode: DEFAULT_PURE_MODE, apiBaseUrl: null
     });
     await saveSettings({ lyricOffsetMs: -500 }, file);
     assert.deepEqual(await loadSettings(file), {
       quality: 'lossless', playerBackend: DEFAULT_PLAYER_BACKEND, imageProtocol: DEFAULT_IMAGE_PROTOCOL,
       cacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES, lyricOffsetMs: -500, smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS,
-      searchLimit: DEFAULT_SEARCH_LIMIT, translationMode: DEFAULT_TRANSLATION_MODE, apiBaseUrl: null
+      searchLimit: DEFAULT_SEARCH_LIMIT, translationMode: DEFAULT_TRANSLATION_MODE,
+      pureMode: DEFAULT_PURE_MODE, apiBaseUrl: null
     });
+    await saveSettings({ pureMode: true }, file);
     await saveSettings({ apiBaseUrl: 'https://api.example.com/' }, file);
     await saveSettings({ quality: 'higher' }, file);
     assert.deepEqual(await loadSettings(file), {
@@ -94,6 +98,7 @@ test('旧配置迁移默认偏移，部分保存不会覆盖另一项设置', as
       cacheMaxBytes: DEFAULT_IMAGE_CACHE_MAX_BYTES, lyricOffsetMs: -500,
       smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS, searchLimit: DEFAULT_SEARCH_LIMIT,
       translationMode: DEFAULT_TRANSLATION_MODE,
+      pureMode: true,
       apiBaseUrl: 'https://api.example.com'
     });
   } finally {

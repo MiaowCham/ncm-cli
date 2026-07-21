@@ -33,6 +33,11 @@ import {
 let cachedWindowsTerminalVersion;
 let retainedSmtcBridge = null;
 
+// 纯净模式只裁剪播放器 chrome，不应关闭歌曲自带的 Credits 内容。
+export function playbackCreditsConfig(song, _pureMode = false) {
+  return easterEggForSong(song);
+}
+
 export function createLatestDebounce(callback, delayMs = 80) {
   let timer = null;
   let pendingValue;
@@ -207,6 +212,7 @@ export function playbackAction(buffer, { playlistOpen = false, playlistSelection
   if (key.toLowerCase() === 'q') return { type: 'quit' };
   if (key.toLowerCase() === 'r') return { type: 'refresh' };
   if (key.toLowerCase() === 'i') return { type: 'import_lyrics' };
+  if (key.toLowerCase() === 'm') return { type: 'toggle_pure_mode' };
   if (key.includes('\u001b[1;5D') || key.includes('\u001b[5D')) return { type: 'playlist_previous' };
   if (key.includes('\u001b[1;5C') || key.includes('\u001b[5C')) return { type: 'playlist_next' };
   // Ctrl+方向键必须先于普通方向键和鼠标序列判断，避免被识别为音量或歌单滚动。
@@ -718,11 +724,12 @@ export function shuffledPlaylistOrder(length, currentIndex, random = Math.random
 
 export function playbackShortcutText({ canFavorite = false, favorited = false, canToggleTranslation = true, hasTranslation = true, hasRomanized = true, canImportLyrics = false } = {}) {
   const label = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
-  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? `  t ${label}` : ''}${canImportLyrics ? '  i 导入歌词' : ''}  r 刷新`;
+  const base = `q 返回  空格 暂停/继续  ←/→ 快退/快进  ↑/↓ 音量  Ctrl+↑/↓ 偏移${canToggleTranslation ? `  t ${label}` : ''}${canImportLyrics ? '  i 导入歌词' : ''}  m 纯净模式  r 刷新`;
   return canFavorite ? `${base}  f ${favorited ? '取消收藏' : '收藏'}` : base;
 }
 
-export function playbackPlaylistModeText({ randomLabel, loopLabel, playlistOpen = false } = {}) {
+export function playbackPlaylistModeText({ randomLabel, loopLabel, playlistOpen = false, pureMode = false } = {}) {
+  if (pureMode) return `[随机：${randomLabel || '不随机'}]  [循环：${loopLabel || '顺序播放'}]`;
   const modes = `[s 随机：${randomLabel || '不随机'}]  [l 循环：${loopLabel || '顺序播放'}]`;
   return playlistOpen
     ? `${modes}  [p/Esc 关闭]  [↑/↓ 选择]  [Enter 播放]  [Ctrl+←/→ 切歌]`
@@ -1040,6 +1047,28 @@ export function playbackCoverRowBudget(rows, maxRenderRows = Infinity) {
   return height > 1 ? Math.max(1, Math.min(limit, Math.max(7, Math.floor(height * 0.4)))) : 0;
 }
 
+export function playbackChromeRows({
+  pureMode = false, preserveLyricSpacer = false, metadataRows = 0, modeRows = 0, shortcutRows = 0
+} = {}) {
+  return {
+    metadataRows: pureMode ? Math.min(2, metadataRows) : metadataRows,
+    metadataSpacerRows: pureMode && !preserveLyricSpacer ? 0 : 1,
+    modeRows,
+    shortcutRows: pureMode ? 0 : shortcutRows
+  };
+}
+
+export function playbackPureOverlayLayout(availableRows, modeRows = 0) {
+  return planPlaybackVerticalLayout({
+    rows: availableRows,
+    futureLyricRows: Math.max(0, Math.floor(Number(availableRows) || 0)),
+    modeRows,
+    statusRows: 1,
+    currentLyricRows: 0,
+    progressRows: 1
+  });
+}
+
 export function compactPlaybackRequiredRow(currentLyric, progress, columns) {
   const width = Math.max(1, Math.floor(Number(columns) || 1));
   if (width === 1) return truncateText(currentLyric || progress, 1);
@@ -1139,6 +1168,7 @@ function renderDynamic({
   canFavorite = false,
   canImportLyrics = false,
   favorited = false,
+  pureMode = false,
   translationMode = 'off',
   canToggleTranslation = true,
   replacePausedContent = false,
@@ -1173,13 +1203,14 @@ function renderDynamic({
     ? playbackPlaylistModeRows({
         randomLabel: playbackModeText.randomLabel,
         loopLabel: playbackModeText.loopLabel,
-        playlistOpen: playbackModeText.playlistOpen
+        playlistOpen: playbackModeText.playlistOpen,
+        pureMode
       }, columns).map((row) => chalk.magentaBright(row))
     : [];
   const hasTranslation = lyrics.some((line) => Boolean(line.translation));
   const hasRomanized = lyrics.some((line) => Boolean(line.romanized));
   const shortcutLabel = hasTranslation && hasRomanized ? '译/音' : hasTranslation ? '译' : '音';
-  const shortcutRows = playbackShortcutRows({
+  const shortcutRows = pureMode ? [] : playbackShortcutRows({
     canFavorite, favorited, canToggleTranslation, hasTranslation, hasRomanized, canImportLyrics
   }, columns).map((row) => {
     const label = translationMode === 'off'
@@ -1190,13 +1221,25 @@ function renderDynamic({
     return chalk.cyanBright(row.replace(`t ${shortcutLabel}`, `t ${label}`));
   });
   if (playlistOpen) {
-    const outputRows = playbackPlaylistOverlayRows({
+    const pureOverlayLayout = pureMode
+      ? playbackPureOverlayLayout(availableRows, modeRows.length)
+      : null;
+    const overlayRows = playbackPlaylistOverlayRows({
       playlist,
       selectedIndex: playlistSelection,
       currentIndex: playlist?.currentIndex,
-      availableRows,
+      availableRows: pureOverlayLayout?.futureLyricRows ?? availableRows,
       columns
     });
+    const outputRows = pureOverlayLayout ? playbackPrioritizedRows({
+      progress,
+      modeRows,
+      indicatorRow: indicator ? chalk.yellow(truncateText(indicator, columns)) : '',
+      optionalSuffixRows: overlayRows,
+      availableRows,
+      columns,
+      layout: pureOverlayLayout
+    }) : overlayRows;
     const position = dynamicAnchored ? '\x1b[u' : `\x1b[${startRow};1H`;
     if (captureOnly) return outputRows;
     writeOutput(`${position}\x1b[0J${outputRows.join('\n')}`);
@@ -1868,8 +1911,10 @@ export async function playWithProgress({
   onImportLyrics,
   onTrackUserStateChange,
   onTranslationModeChange,
+  onPureModeChange,
   registerLyricsRefresh,
   translationMode = 'off',
+  pureMode = false,
   favorited = false,
   returnPageRows = []
 }) {
@@ -1919,6 +1964,7 @@ export async function playWithProgress({
   let hasTranslation = lyrics.some((line) => Boolean(line.translation));
   let preferredTranslationMode = ['off', 'translated', 'romanized'].includes(translationMode)
     ? translationMode : 'off';
+  let activePureMode = Boolean(pureMode);
   let showTranslation = false;
   let showRomanized = false;
   const applyPreferredTranslation = () => {
@@ -1934,7 +1980,7 @@ export async function playWithProgress({
   let indicatorUntil = 0;
   let favoritePending = false;
   let lyricImportPending = false;
-  let translationModeSave = Promise.resolve();
+  let playbackSettingsSave = Promise.resolve();
   let userStateSave = Promise.resolve();
   const persistUserState = (patch) => {
     if (typeof onTrackUserStateChange !== 'function') return;
@@ -2155,7 +2201,7 @@ export async function playWithProgress({
   };
 
   const creditsPlayerTransitionActive = () => Boolean(
-    easterEggForSong(activeSong)
+    playbackCreditsConfig(activeSong, activePureMode)
     && creditsEasterEggTimelineForSong(
       activeSong,
       clock.position(),
@@ -2208,7 +2254,7 @@ export async function playWithProgress({
     const lyricElapsedMs = elapsedMs;
     const now = performance.now();
     if (indicator && now >= indicatorUntil) indicator = '';
-    const easterEggConfig = easterEggForSong(activeSong);
+    const easterEggConfig = playbackCreditsConfig(activeSong, activePureMode);
     const easterEggTimeline = easterEggConfig
       ? creditsEasterEggTimelineForSong(
           activeSong, rawElapsedMs, lyricElapsedMs, Math.max(1, process.stdout.rows || 24)
@@ -2235,6 +2281,7 @@ export async function playWithProgress({
       playbackModeText: playlistTracks.length
         ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen }
         : '',
+      pureMode: activePureMode,
       canFavorite: typeof onFavorite === 'function',
       canImportLyrics: typeof onImportLyrics === 'function',
       favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
@@ -2352,7 +2399,7 @@ export async function playWithProgress({
   };
 
   const captureDirectCreditsAnimationRows = (rawElapsedMs = clock.position()) => {
-    const config = easterEggForSong(activeSong);
+    const config = playbackCreditsConfig(activeSong, activePureMode);
     if (!config?.directAnimation) return [];
     const elapsedMs = displayPosition(rawElapsedMs, activeOffsetMs);
     const timeline = creditsEasterEggTimelineForSong(
@@ -2373,6 +2420,7 @@ export async function playWithProgress({
       playbackModeText: playlistTracks.length
         ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen: false }
         : '',
+      pureMode: activePureMode,
       canFavorite: typeof onFavorite === 'function',
       favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
       dynamicRow: 1,
@@ -2385,7 +2433,7 @@ export async function playWithProgress({
   };
 
   const playDirectCreditsEntryTransition = async (transitionSignal) => {
-    const config = easterEggForSong(activeSong);
+    const config = playbackCreditsConfig(activeSong, activePureMode);
     if (!tty || !config?.directAnimation) return;
     if (refreshTimer) clearTimeout(refreshTimer);
     const terminalRows = Math.max(1, process.stdout.rows || 24);
@@ -2406,7 +2454,7 @@ export async function playWithProgress({
   };
 
   const playDirectCreditsExitTransition = async () => {
-    const config = easterEggForSong(activeSong);
+    const config = playbackCreditsConfig(activeSong, activePureMode);
     if (!tty || !config?.directAnimation) return;
     if (refreshTimer) clearTimeout(refreshTimer);
     const terminalRows = Math.max(1, process.stdout.rows || 24);
@@ -2498,7 +2546,8 @@ export async function playWithProgress({
       ? playbackPlaylistModeRows({
           randomLabel: randomLabels[randomMode],
           loopLabel: loopLabels[loopMode],
-          playlistOpen
+          playlistOpen,
+          pureMode: activePureMode
         }, terminalColumns).length
       : 0;
     const shortcutRowCount = playbackShortcutRows({
@@ -2506,14 +2555,23 @@ export async function playWithProgress({
       favorited: favoritedSongIds.has(String(songSnapshot?.id ?? '')),
       canImportLyrics: typeof onImportLyrics === 'function'
     }, terminalColumns).length;
+    const chromeRows = playbackChromeRows({
+      pureMode: activePureMode,
+      preserveLyricSpacer: Boolean(
+        playbackCreditsConfig(songSnapshot, activePureMode)?.currentLyricOnly
+      ),
+      metadataRows: playbackMetadataRows(songSnapshot, backendLabel, terminalColumns).length,
+      modeRows: modeRowCount,
+      shortcutRows: shortcutRowCount
+    });
     return planPlaybackVerticalLayout({
       rows: terminalRows,
       coverRows,
-      metadataRows: playbackMetadataRows(songSnapshot, backendLabel, terminalColumns).length,
-      metadataSpacerRows: 1,
+      metadataRows: chromeRows.metadataRows,
+      metadataSpacerRows: chromeRows.metadataSpacerRows,
       futureLyricRows: terminalRows,
-      modeRows: modeRowCount,
-      shortcutRows: shortcutRowCount,
+      modeRows: chromeRows.modeRows,
+      shortcutRows: chromeRows.shortcutRows,
       statusRows: 1,
       currentLyricRows: 1,
       progressRows: 1
@@ -2564,6 +2622,7 @@ export async function playWithProgress({
       playbackModeText: playlistTracks.length
         ? { randomLabel: randomLabels[randomMode], loopLabel: loopLabels[loopMode], playlistOpen: false }
         : '',
+      pureMode: activePureMode,
       canFavorite: typeof onFavorite === 'function',
       favorited: favoritedSongIds.has(String(activeSong?.id ?? '')),
       compactPausedRow: activeSong.name || activeSong.title || '',
@@ -2571,7 +2630,7 @@ export async function playWithProgress({
       replacePausedContent: layout.metadataRows === 0,
       dynamicRow: headerRows.length + 1,
       dynamicAnchored: false,
-      currentLyricOnly: Boolean(easterEggForSong(activeSong)?.currentLyricOnly),
+      currentLyricOnly: Boolean(playbackCreditsConfig(activeSong, activePureMode)?.currentLyricOnly),
       easterEgg: null,
       verticalLayout: layout,
       captureOnly: true
@@ -2613,7 +2672,7 @@ export async function playWithProgress({
       ? playbackCoverRowBudget(initialRows, imageRenderMaxRows)
       : 0;
     let verticalLayout = verticalLayoutFor(songSnapshot, initialRows, initialColumns, desiredCoverRows);
-    const creditsConfig = easterEggForSong(songSnapshot);
+    const creditsConfig = playbackCreditsConfig(songSnapshot, activePureMode);
     const creditsTimeline = creditsConfig ? creditsEasterEggTimelineForSong(
       songSnapshot,
       clock.position(),
@@ -2799,7 +2858,9 @@ export async function playWithProgress({
     }
 
     const oldPosition = clock.position();
-    const leavingDirectAnimation = Boolean(easterEggForSong(activeSong)?.directAnimation);
+    const leavingDirectAnimation = Boolean(
+      playbackCreditsConfig(activeSong, activePureMode)?.directAnimation
+    );
     const wasPlaying = Boolean(child && !userPaused);
     setIndicator(`正在切换到 ${targetIndex + 1}/${playlistTracks.length}`);
     render();
@@ -2890,7 +2951,9 @@ export async function playWithProgress({
     invalidateRestart();
     if (closing) return transitionCancelled;
     updateSmtcControls();
-    const directAnimation = Boolean(easterEggForSong(activeSong)?.directAnimation);
+    const directAnimation = Boolean(
+      playbackCreditsConfig(activeSong, activePureMode)?.directAnimation
+    );
     let started;
     if (leavingDirectAnimation && !directAnimation) {
       try {
@@ -3032,6 +3095,20 @@ export async function playWithProgress({
         return;
       }
       void drawHeader(null, { reason: 'manual_refresh' }).catch((error) => {
+        if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
+      });
+      return;
+    }
+    if (action.type === 'toggle_pure_mode') {
+      activePureMode = !activePureMode;
+      if (typeof onPureModeChange === 'function') {
+        const nextPureMode = activePureMode;
+        playbackSettingsSave = playbackSettingsSave.then(() => onPureModeChange(nextPureMode)).catch((error) => {
+          void logger?.warn('pure_mode_save_failed', { error });
+        });
+      }
+      setIndicator(activePureMode ? '纯净模式已开启' : '纯净模式已关闭');
+      void drawHeader(null, { reason: 'pure_mode_change' }).catch((error) => {
         if (error?.name !== 'AbortError') void logger?.warn('playback_header_failed', { error });
       });
       return;
@@ -3279,7 +3356,7 @@ export async function playWithProgress({
       preferredTranslationMode = showRomanized ? 'romanized' : showTranslation ? 'translated' : 'off';
       if (typeof onTranslationModeChange === 'function') {
         const mode = preferredTranslationMode;
-        translationModeSave = translationModeSave.then(() => onTranslationModeChange(mode)).catch((error) => {
+        playbackSettingsSave = playbackSettingsSave.then(() => onTranslationModeChange(mode)).catch((error) => {
           void logger?.warn('translation_mode_save_failed', { error });
         });
       }
@@ -3366,7 +3443,9 @@ export async function playWithProgress({
     }
     if (!persistentController) backendLabel = playerBackendLabel(player.command, { persistent: false });
     if (tty) {
-      const directAnimation = Boolean(easterEggForSong(activeSong)?.directAnimation);
+      const directAnimation = Boolean(
+        playbackCreditsConfig(activeSong, activePureMode)?.directAnimation
+      );
       process.stdout.write(playbackEntrySequence(directAnimation));
       if (directAnimation) {
         restoreInput = setupRawInput(rl, handleData);
@@ -3425,7 +3504,7 @@ export async function playWithProgress({
     dynamicWriter?.close();
     try {
       await userStateSave;
-      await translationModeSave;
+      await playbackSettingsSave;
       await stopCurrent();
       const sharedMediaPlayerBridge = persistentController === smtc;
       if (!retainSmtc || !sharedMediaPlayerBridge) await persistentController?.close();

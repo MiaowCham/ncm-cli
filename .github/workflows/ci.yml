@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -92,7 +93,7 @@ jobs:
 
   publish-prerelease:
     name: 发布 Pre-Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: [tests-and-audit, windows-helper-package, codeql]
     runs-on: windows-latest
     permissions:

@@ -152,6 +152,7 @@ jyeffect  sky     dolby   jymaster
 | `↑` / `↓` | 调整音量 |
 | `Ctrl+↑` / `Ctrl+↓` | 以 50 ms 调整播放时间偏移 |
 | `t` | 开关翻译歌词 |
+| `m` | 开关纯净模式 |
 | `i` | 从本地文件导入歌词 |
 | `f` | 收藏或取消收藏当前歌曲（仅登录后显示） |
 | `r` | 刷新播放页面 |
@@ -229,6 +230,8 @@ ncm-cli idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 - `NCM_SMTC_HELPER`：覆盖 Windows SMTC/MediaPlayer helper 可执行文件路径
 
 普通播放时间偏移默认是 `0 ms`，同时作用于进度条、歌词、Credits EX 彩蛋和 SMTC 时间线。配置字段 `smtcOffsetMs` 的额外偏移只影响 SMTC；该字段继续兼容已有配置，但不再提供斜杠命令。两者范围均为 `-60000` 至 `60000 ms`。
+
+播放器按 `m` 切换纯净模式后，只保留封面、歌名、歌手、歌词、状态和进度条；歌单播放还会保留随机与循环状态。快捷键仍可正常使用，模式状态会保存到 `settings.json` 并在下次启动时恢复。
 
 ## 缓存与自定义歌词
 

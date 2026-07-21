@@ -11,6 +11,7 @@ export const DEFAULT_LYRIC_OFFSET_MS = 0;
 export const DEFAULT_SMTC_OFFSET_MS = 0;
 export const DEFAULT_SEARCH_LIMIT = 30;
 export const DEFAULT_TRANSLATION_MODE = 'off';
+export const DEFAULT_PURE_MODE = false;
 export const DEFAULT_CACHE_MAX_BYTES = null;
 export const MAX_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024;
 export const DEFAULT_IMAGE_CACHE_MAX_BYTES = DEFAULT_CACHE_MAX_BYTES;
@@ -57,6 +58,7 @@ export async function loadSettings(file = settingsFilePath()) {
       searchLimit: validSearchLimit(data.searchLimit) ? data.searchLimit : DEFAULT_SEARCH_LIMIT,
       translationMode: ['off', 'translated', 'romanized'].includes(data.translationMode)
         ? data.translationMode : DEFAULT_TRANSLATION_MODE,
+      pureMode: typeof data.pureMode === 'boolean' ? data.pureMode : DEFAULT_PURE_MODE,
       apiBaseUrl
     };
     const keys = Object.keys(settings);
@@ -79,6 +81,7 @@ export async function loadSettings(file = settingsFilePath()) {
         smtcOffsetMs: DEFAULT_SMTC_OFFSET_MS,
         searchLimit: DEFAULT_SEARCH_LIMIT,
         translationMode: DEFAULT_TRANSLATION_MODE,
+        pureMode: DEFAULT_PURE_MODE,
         apiBaseUrl: null
       };
       if (error instanceof SyntaxError) await writeSettingsFile(defaults, file);
@@ -120,6 +123,7 @@ export async function saveSettings(settings, file = settingsFilePath()) {
   if (!['off', 'translated', 'romanized'].includes(next.translationMode)) {
     throw new Error(`不支持的歌词翻译模式：${next.translationMode}`);
   }
+  if (typeof next.pureMode !== 'boolean') throw new Error('纯净模式设置必须是布尔值');
   if (next.apiBaseUrl != null) next.apiBaseUrl = normalizeApiBaseUrl(next.apiBaseUrl);
   return writeSettingsFile(next, file);
 }
