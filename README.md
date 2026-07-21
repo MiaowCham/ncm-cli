@@ -41,7 +41,7 @@ npm start
 
 ```bash
 npm install -g .
-ncm
+ncm-cli
 ```
 
 > [!NOTE]
@@ -210,8 +210,8 @@ Windows 下会向 SMTC 发布标题、歌手、专辑、封面、播放状态和
 也支持真正的 Shell 管道和重定向：
 
 ```bash
-ncm idlyric 347230 > lyrics.txt
-ncm idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
+ncm-cli idlyric 347230 > lyrics.txt
+ncm-cli idlyric 347230 | Out-File -Encoding utf8 lyrics.txt
 ```
 
 ## 配置

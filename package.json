@@ -4,7 +4,7 @@
   "description": "基于 neteasecloudmusicapienhanced/api-enhanced 的交互式 CLI 点歌工具",
   "type": "module",
   "bin": {
-    "ncm": "./bin/ncm.js"
+    "ncm-cli": "./bin/ncm.js"
   },
   "files": [
     "assets/",
