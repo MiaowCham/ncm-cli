@@ -1454,6 +1454,13 @@ export function sixelCursorBox(output, height) {
   ]);
 }
 
+export function prepareSixelRender(output, height) {
+  const payload = Buffer.isBuffer(output) ? output : Buffer.from(String(output ?? ''));
+  if (!payload.includes(Buffer.from('\x1bP'))) return null;
+  const resultRows = Math.max(1, Math.floor(Number(height) || 1));
+  return { output: sixelCursorBox(payload, resultRows), resultRows };
+}
+
 export function createLatestTerminalWriter(stream, {
   onDiagnostic = () => {},
   now = Date.now,
@@ -1723,23 +1730,25 @@ export async function tryRenderImage(source, {
             maxBuffer: 4 * 1024 * 1024
           });
           const encodeMs = Date.now() - encodeStartedAt;
-          if (rendered.status === 0 && rendered.stdout?.includes(Buffer.from('\x1bP'))) {
+          const prepared = rendered.status === 0
+            ? prepareSixelRender(rendered.stdout, height)
+            : null;
+          if (prepared) {
             if (!current()) return finish(0, 'cancelled', { stage: 'sixel_encoded' });
             // chafa 1.14 等版本只输出 SIXEL DCS，且各终端在 DCS 结束后的
             // 光标位置并不一致。恢复到图片起点后按布局高度显式定位，确保
             // 详情页、播放器的行预算与真实文本光标始终一致。
-            const output = sixelCursorBox(rendered.stdout, height);
             const writeStartedAt = Date.now();
-            await writeTerminalOutput(output);
+            await writeTerminalOutput(prepared.output);
             const writeMs = Date.now() - writeStartedAt;
             mediaLog(logger, 'info', 'image_protocol_attempt_completed', {
               ...common, selectedProtocol, status: 'success', encodeMs, writeMs,
-              durationMs: Date.now() - attemptStartedAt, outputBytes: output.length,
-              resultRows: height
+              durationMs: Date.now() - attemptStartedAt, outputBytes: prepared.output.length,
+              resultRows: prepared.resultRows
             });
-            return finish(height, 'success', {
+            return finish(prepared.resultRows, 'success', {
               selectedProtocol, width, height, encodeMs, writeMs,
-              renderMs: reportPerformance(selectedProtocol, resultRows)
+              renderMs: reportPerformance(selectedProtocol, prepared.resultRows)
             });
           }
           mediaLog(logger, 'warn', 'image_protocol_attempt_completed', {

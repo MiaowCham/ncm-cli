@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { addLyricInterludes, adjustPlaybackOffset, ansiImageLimits, attachLyricTranslations, compactPlaybackRequiredRow, createLatestDebounce, createLatestTerminalWriter, createPlaybackClock, displayPosition, findPlayer, imageProtocolOrder, isTermuxEnvironment, LOOP_MODES, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, planCoverSize, planPlaybackVerticalLayout, playbackAction, playbackCoverRowBudget, playbackDynamicRows, playbackEntrySequence, playbackImportPromptSequence, playbackLyricRows, playbackMetadataRows, playbackMouseTrackingSequence, playbackPlaylistModeRows, playbackPlaylistModeText, playbackPlaylistOverlayRows, playbackPrioritizedRows, playbackProgressSegments, playbackProgressText, playbackRowsWithTopSpacer, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playerBackendLabel, playerCommandsForBackend, playlistViewport, RANDOM_MODES, rawPosition, resolveCommandExecutable, runPlaybackExitSequence, shouldSyncPlayerPosition, shuffledPlaylistOrder, sixelCursorBox, smtcTimeline, startTrackWithPreparedHeader, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
+import { addLyricInterludes, adjustPlaybackOffset, ansiImageLimits, attachLyricTranslations, compactPlaybackRequiredRow, createLatestDebounce, createLatestTerminalWriter, createPlaybackClock, displayPosition, findPlayer, imageProtocolOrder, isTermuxEnvironment, LOOP_MODES, lyricPosition, lyricTone, lyricViewport, nextRefreshDelay, planCoverSize, planPlaybackVerticalLayout, playbackAction, playbackCoverRowBudget, playbackDynamicRows, playbackEntrySequence, playbackImportPromptSequence, playbackLyricRows, playbackMetadataRows, playbackMouseTrackingSequence, playbackPlaylistModeRows, playbackPlaylistModeText, playbackPlaylistOverlayRows, playbackPrioritizedRows, playbackProgressSegments, playbackProgressText, playbackRowsWithTopSpacer, playbackShortcutRows, playbackShortcutText, playbackTerminalModeSequence, playerArguments, playerBackendLabel, playerCommandsForBackend, playlistViewport, prepareSixelRender, RANDOM_MODES, rawPosition, resolveCommandExecutable, runPlaybackExitSequence, shouldSyncPlayerPosition, shuffledPlaylistOrder, sixelCursorBox, smtcTimeline, startTrackWithPreparedHeader, supportsSixelEnvironment, terminatePlayer, toggleTranslationState, waitWithSignal, wrapTerminalText } from '../src/media.js';
 import stringWidth from 'string-width';
 import { createTrackOffsetSession } from '../src/media.js';
 
@@ -232,6 +232,16 @@ test('SIXEL 输出固定恢复并下移到约定图片高度', () => {
     sixelCursorBox(sixel, 8),
     Buffer.concat([Buffer.from('\x1b7'), sixel, Buffer.from('\x1b8\x1b[8E')])
   );
+});
+
+test('SIXEL 成功结果携带确定行数且不会被误判为协议失败', () => {
+  const sixel = Buffer.from('\x1bPqpayload\x1b\\');
+  assert.deepEqual(prepareSixelRender(sixel, 8), {
+    output: sixelCursorBox(sixel, 8),
+    resultRows: 8
+  });
+  assert.equal(prepareSixelRender('plain text', 8), null);
+  assert.equal(prepareSixelRender(sixel, 0).resultRows, 1);
 });
 
 test('ANSI 256 色模式单独限制尺寸且真彩 ANSI 保留原始大小', () => {
