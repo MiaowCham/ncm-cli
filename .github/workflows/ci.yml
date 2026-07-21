@@ -1,0 +1,182 @@
+name: 自动审查
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  tests-and-audit:
+    name: 测试与依赖审计
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+      - name: 设置 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 运行测试
+        env:
+          NCM_CLI_CONFIG_DIR: ${{ runner.temp }}/ncm-cli-config
+        run: npm test
+      - name: 依赖安全审计
+        if: always()
+        run: npm audit --omit=dev
+
+  windows-helper-package:
+    name: Windows helper 构建与打包
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+      - name: 设置 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: 设置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: native/smtc-bridge/go.sum
+      - name: 安装依赖
+        run: npm ci --ignore-scripts
+      - name: 构建双架构 helper
+        run: npm run build:smtc:all
+      - name: 验证架构与 npm 包内容
+        shell: pwsh
+        run: |
+          go version -m native/smtc-bridge/publish/win-x64/ncm-cli-smtc-bridge.exe | Select-String 'GOARCH=amd64'
+          go version -m native/smtc-bridge/publish/win-arm64/ncm-cli-smtc-bridge.exe | Select-String 'GOARCH=arm64'
+          $packResult = npm pack --dry-run --json | ConvertFrom-Json
+          $package = if ($packResult.files) {
+            $packResult
+          } elseif ($packResult -is [array]) {
+            $packResult[0]
+          } else {
+            $packResult.PSObject.Properties.Value | Select-Object -First 1
+          }
+          $paths = @($package.files.path)
+          $required = @(
+            'native/smtc-bridge/NOTICE.md',
+            'native/smtc-bridge/publish/win-x64/ncm-cli-smtc-bridge.exe',
+            'native/smtc-bridge/publish/win-arm64/ncm-cli-smtc-bridge.exe'
+          )
+          foreach ($path in $required) {
+            if ($path -notin $paths) { throw "npm 包缺少 $path" }
+          }
+
+  codeql:
+    name: CodeQL 分析
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+      - name: 初始化 CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript
+      - name: 自动构建
+        uses: github/codeql-action/autobuild@v4
+      - name: 执行 CodeQL 分析
+        uses: github/codeql-action/analyze@v4
+
+  publish-prerelease:
+    name: 发布 Pre-Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [tests-and-audit, windows-helper-package, codeql]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+      - name: 设置 Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: 设置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: native/smtc-bridge/go.sum
+      - name: 安装依赖
+        run: npm ci --ignore-scripts
+      - name: 构建并验证发布包
+        id: package
+        shell: pwsh
+        run: |
+          $baseVersion = node -p "require('./package.json').version"
+          $version = "$baseVersion-pre.$env:GITHUB_RUN_NUMBER"
+          npm version $version --no-git-tag-version
+          npm run build:smtc:all
+
+          $packResult = npm pack --json | ConvertFrom-Json
+          $package = if ($packResult.files) {
+            $packResult
+          } elseif ($packResult -is [array]) {
+            $packResult[0]
+          } else {
+            $packResult.PSObject.Properties.Value | Select-Object -First 1
+          }
+          $paths = @($package.files.path)
+          $required = @(
+            'native/smtc-bridge/NOTICE.md',
+            'native/smtc-bridge/publish/win-x64/ncm-cli-smtc-bridge.exe',
+            'native/smtc-bridge/publish/win-arm64/ncm-cli-smtc-bridge.exe'
+          )
+          foreach ($path in $required) {
+            if ($path -notin $paths) { throw "发布包缺少 $path" }
+          }
+
+          $tarball = $package.filename
+          if (-not (Test-Path -LiteralPath $tarball)) { throw "未生成发布包 $tarball" }
+          $checksum = "${tarball}.sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball).Hash.ToLowerInvariant()
+          "$hash  $tarball" | Set-Content -LiteralPath $checksum -Encoding ascii
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tarball=$tarball" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+      - name: 创建 GitHub Pre-Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+          RELEASE_TARBALL: ${{ steps.package.outputs.tarball }}
+          RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          $tag = "v$env:RELEASE_VERSION"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $tagSha = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha'
+            if ($tagSha -ne $env:GITHUB_SHA) {
+              throw "Pre-Release 标签 $tag 已指向其他提交 $tagSha"
+            }
+            gh release edit $tag `
+              --title "ncm-cli $tag" `
+              --prerelease `
+              --latest=false
+            gh release upload $tag `
+              $env:RELEASE_TARBALL `
+              $env:RELEASE_CHECKSUM `
+              --clobber
+          } else {
+            gh release create $tag `
+              $env:RELEASE_TARBALL `
+              $env:RELEASE_CHECKSUM `
+              --target $env:GITHUB_SHA `
+              --title "ncm-cli $tag" `
+              --generate-notes `
+              --prerelease `
+              --latest=false
+          }
